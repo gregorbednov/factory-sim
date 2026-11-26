@@ -1,0 +1,426 @@
+{
+  "version": 1,
+  "name": "Фильтрация, теплообмен и розлив",
+  "parts": [
+    {
+      "id": "dirty",
+      "name": "Источник загрязнённой воды",
+      "kind": "water_source",
+      "position": [
+        -5.8,
+        0.45,
+        0
+      ],
+      "size": [
+        0.5,
+        0.9,
+        0.5
+      ],
+      "temperature_c": 20,
+      "max_flow_l_s": 0.35,
+      "dirt_mg_l": 500
+    },
+    {
+      "id": "filter",
+      "name": "Фильтр подачи",
+      "kind": "water_filter",
+      "position": [
+        -4.7,
+        0.4,
+        0
+      ],
+      "size": [
+        0.35,
+        0.4,
+        0.28
+      ],
+      "clean_resistance": 3,
+      "dirty_resistance": 32,
+      "capacity_mg": 8000,
+      "efficiency_pct": 99.9
+    },
+    {
+      "id": "pump",
+      "name": "Насос подачи",
+      "kind": "water_pump",
+      "position": [
+        -3.75,
+        0.16,
+        0
+      ],
+      "size": [
+        0.42,
+        0.32,
+        0.32
+      ],
+      "max_flow_l_s": 0.35,
+      "shutoff_head_m": 4,
+      "dirt_limit_mg": 100
+    },
+    {
+      "id": "split",
+      "name": "Разветвитель",
+      "kind": "water_junction",
+      "position": [
+        -2.8,
+        0.25,
+        0
+      ],
+      "size": [
+        0.3,
+        0.22,
+        0.4
+      ],
+      "mixing": false
+    },
+    {
+      "id": "heater",
+      "name": "Проточный нагреватель",
+      "kind": "water_heater",
+      "position": [
+        -1.85,
+        0.25,
+        -0.8
+      ],
+      "size": [
+        0.42,
+        0.3,
+        0.34
+      ],
+      "max_power_w": 3000
+    },
+    {
+      "id": "cold",
+      "name": "Источник охлаждающей воды",
+      "kind": "water_source",
+      "position": [
+        -0.85,
+        0.45,
+        -2.2
+      ],
+      "size": [
+        0.5,
+        0.9,
+        0.5
+      ],
+      "temperature_c": 10,
+      "max_flow_l_s": 0.16
+    },
+    {
+      "id": "exchanger",
+      "name": "Теплообменник",
+      "kind": "water_heat_exchanger",
+      "position": [
+        0.35,
+        0.29,
+        -0.6
+      ],
+      "size": [
+        0.5,
+        0.42,
+        0.6
+      ],
+      "conductance_w_k": 260,
+      "resistance": 8
+    },
+    {
+      "id": "thermometer",
+      "name": "Термометр",
+      "kind": "water_instrument",
+      "position": [
+        1.25,
+        0.25,
+        -0.65
+      ],
+      "size": [
+        0.25,
+        0.25,
+        0.18
+      ],
+      "measurement": "temperature"
+    },
+    {
+      "id": "coolant_drain",
+      "name": "Слив охлаждающей воды",
+      "kind": "water_drain",
+      "position": [
+        1.55,
+        0.065,
+        -1.8
+      ],
+      "size": [
+        0.42,
+        0.13,
+        0.42
+      ],
+      "max_flow_l_s": 0.16
+    },
+    {
+      "id": "meter",
+      "name": "Расходомер байпаса",
+      "kind": "water_instrument",
+      "position": [
+        -1.4,
+        0.23,
+        0.8
+      ],
+      "size": [
+        0.25,
+        0.25,
+        0.18
+      ],
+      "measurement": "flow"
+    },
+    {
+      "id": "gauge",
+      "name": "Манометр байпаса",
+      "kind": "water_instrument",
+      "position": [
+        0.45,
+        0.24,
+        0.84
+      ],
+      "size": [
+        0.25,
+        0.25,
+        0.18
+      ],
+      "measurement": "pressure"
+    },
+    {
+      "id": "mix",
+      "name": "Смеситель",
+      "kind": "water_junction",
+      "position": [
+        2.3,
+        0.25,
+        0
+      ],
+      "size": [
+        0.3,
+        0.22,
+        0.44
+      ],
+      "mixing": true
+    },
+    {
+      "id": "filler",
+      "name": "Дозатор",
+      "kind": "water_filler",
+      "position": [
+        3.4,
+        0.56,
+        0
+      ],
+      "size": [
+        0.35,
+        0.4,
+        0.4
+      ],
+      "max_flow_l_s": 0.13,
+      "dose_l": 0.45
+    },
+    {
+      "id": "belt",
+      "name": "Конвейер розлива",
+      "kind": "conveyor",
+      "position": [
+        3.55,
+        0.1,
+        0
+      ],
+      "size": [
+        1.8,
+        0.2,
+        0.5
+      ],
+      "speed": 0.3
+    },
+    {
+      "id": "bottle",
+      "name": "Бутылка под дозатором",
+      "kind": "crate",
+      "position": [
+        3.4,
+        0.311,
+        0
+      ],
+      "size": [
+        0.08,
+        0.22,
+        0.08
+      ],
+      "mass": 0.045,
+      "product": "bottle-500ml"
+    }
+  ],
+  "pipes": [
+    {
+      "from": "dirty",
+      "to": "filter"
+    },
+    {
+      "from": "filter",
+      "to": "pump"
+    },
+    {
+      "from": "pump",
+      "to": "split"
+    },
+    {
+      "from": "split",
+      "to": "heater"
+    },
+    {
+      "from": "heater",
+      "to": "exchanger"
+    },
+    {
+      "from": "exchanger",
+      "to": "thermometer"
+    },
+    {
+      "from": "thermometer",
+      "to": "mix"
+    },
+    {
+      "from": "meter",
+      "to": "gauge"
+    },
+    {
+      "from": "mix",
+      "to": "filler"
+    },
+    {
+      "from": "split",
+      "to": "meter",
+      "from_port": 1
+    },
+    {
+      "from": "gauge",
+      "to": "mix",
+      "to_port": 1
+    },
+    {
+      "from": "cold",
+      "to": "exchanger",
+      "to_port": 1
+    },
+    {
+      "from": "exchanger",
+      "to": "coolant_drain",
+      "from_port": 1
+    }
+  ],
+  "initial_commands": {
+    "pump.target_l_s": 0.25,
+    "heater.power_pct": 65,
+    "filler.fill": true,
+    "belt.enabled": false
+  },
+  "drivers": [
+    {
+      "id": "process_modbus",
+      "enabled": false,
+      "protocol": "modbus_server",
+      "address": "127.0.0.1:1502",
+      "on_disconnect": "reset",
+      "bindings": [
+        {
+          "tag": "pump.reset_fault",
+          "area": "coil",
+          "address": 0
+        },
+        {
+          "tag": "filter.replace",
+          "area": "coil",
+          "address": 1
+        },
+        {
+          "tag": "filler.fill",
+          "area": "coil",
+          "address": 2
+        },
+        {
+          "tag": "belt.enabled",
+          "area": "coil",
+          "address": 3
+        },
+        {
+          "tag": "pump.failed",
+          "area": "discrete_input",
+          "address": 0
+        },
+        {
+          "tag": "filler.container_present",
+          "area": "discrete_input",
+          "address": 1
+        },
+        {
+          "tag": "filler.dose_done",
+          "area": "discrete_input",
+          "address": 2
+        },
+        {
+          "tag": "pump.target_l_s",
+          "area": "holding_register",
+          "address": 0,
+          "scale": 10000
+        },
+        {
+          "tag": "heater.power_pct",
+          "area": "holding_register",
+          "address": 1,
+          "scale": 100
+        },
+        {
+          "tag": "filler.target_l",
+          "area": "holding_register",
+          "address": 2,
+          "scale": 10000
+        },
+        {
+          "tag": "meter.flow_l_s",
+          "area": "input_register",
+          "address": 0,
+          "scale": 10000
+        },
+        {
+          "tag": "gauge.pressure_kpa",
+          "area": "input_register",
+          "address": 1,
+          "scale": 100
+        },
+        {
+          "tag": "thermometer.temperature_c",
+          "area": "input_register",
+          "address": 2,
+          "scale": 100
+        },
+        {
+          "tag": "filter.loading_pct",
+          "area": "input_register",
+          "address": 3,
+          "scale": 100
+        },
+        {
+          "tag": "filter.dirt_mg_l",
+          "area": "input_register",
+          "address": 4,
+          "scale": 10
+        },
+        {
+          "tag": "pump.failures",
+          "area": "input_register",
+          "address": 5
+        },
+        {
+          "tag": "filler.filled_l",
+          "area": "input_register",
+          "address": 6,
+          "scale": 10000
+        }
+      ]
+    }
+  ]
+}

@@ -41,6 +41,8 @@ pub struct Product {
     pub name: String,
     pub size: [f32; 3],
     pub mass: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liquid_capacity_l: Option<f32>,
     pub geometry: Geometry,
     pub mesh: Arc<Mesh>,
 }
@@ -51,6 +53,7 @@ pub struct ProductSpec<'a> {
     pub name: &'a str,
     pub size: [f32; 3],
     pub mass: f32,
+    pub liquid_capacity_l: Option<f32>,
     #[cfg(any(feature = "studio", feature = "web"))]
     pub color: [u8; 3],
     #[cfg(any(feature = "studio", feature = "web"))]
@@ -70,6 +73,7 @@ const fn box_spec(
         name: _name,
         size,
         mass,
+        liquid_capacity_l: None,
         #[cfg(any(feature = "studio", feature = "web"))]
         color: _color,
         #[cfg(any(feature = "studio", feature = "web"))]
@@ -78,7 +82,7 @@ const fn box_spec(
     }
 }
 
-pub const BOXES: [(&str, ProductSpec<'static>); 7] = [
+pub const BOXES: [(&str, ProductSpec<'static>); 9] = [
     (
         "box-carton",
         box_spec(
@@ -149,6 +153,32 @@ pub const BOXES: [(&str, ProductSpec<'static>); 7] = [
             false,
         ),
     ),
+    (
+        "bottle-500ml",
+        ProductSpec {
+            liquid_capacity_l: Some(0.5),
+            ..box_spec(
+                "Bottle 0.5 L",
+                [0.08, 0.22, 0.08],
+                0.045,
+                [100, 178, 184],
+                false,
+            )
+        },
+    ),
+    (
+        "canister-2l",
+        ProductSpec {
+            liquid_capacity_l: Some(2.0),
+            ..box_spec(
+                "Canister 2 L",
+                [0.15, 0.23, 0.12],
+                0.12,
+                [92, 140, 177],
+                false,
+            )
+        },
+    ),
 ];
 
 impl Product {
@@ -158,6 +188,7 @@ impl Product {
             name: &self.name,
             size: self.size,
             mass: self.mass,
+            liquid_capacity_l: self.liquid_capacity_l,
             #[cfg(any(feature = "studio", feature = "web"))]
             color: [133, 162, 177],
             #[cfg(any(feature = "studio", feature = "web"))]
@@ -168,6 +199,11 @@ impl Product {
 
     pub fn validate(&self) -> Result<()> {
         ensure!(!self.name.trim().is_empty(), "empty product name");
+        ensure!(
+            self.liquid_capacity_l
+                .is_none_or(|v| v.is_finite() && v > 0.0),
+            "invalid liquid capacity"
+        );
         ensure!(
             self.mass.is_finite() && (0.001..=1000.0).contains(&self.mass),
             "invalid mass"

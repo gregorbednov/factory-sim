@@ -744,6 +744,24 @@ impl Studio {
                 return;
             }
             ui.separator();
+            if let Some(pipes) =
+                inspector::pipes(ui, language, &self.project, &id, !snapshot.running)
+            {
+                if self.dirty {
+                    self.project.pipes = pipes;
+                } else {
+                    let result = self
+                        .session
+                        .runtime
+                        .handle
+                        .execute(Action::SetPipes(pipes.clone()));
+                    if result.is_ok() {
+                        self.project.pipes = pipes;
+                        self.unsaved = true;
+                    }
+                    self.set_error(result);
+                }
+            }
             let prefix = format!("{id}.");
             for (tag_id, tag) in self.project.tags().range(prefix.clone()..) {
                 if !tag_id.starts_with(&prefix) {

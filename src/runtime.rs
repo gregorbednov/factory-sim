@@ -23,6 +23,8 @@ pub enum Action {
     Reset,
     #[cfg(feature = "studio")]
     Step(u32),
+    #[cfg(feature = "studio")]
+    SetPipes(Vec<crate::project::Pipe>),
     Write(Vec<(String, Value)>),
     DriverStatus {
         driver: String,
@@ -216,6 +218,8 @@ fn apply(sim: &mut Simulation, action: Action) -> Result<()> {
                 sim.step();
             }
         }
+        #[cfg(feature = "studio")]
+        Action::SetPipes(pipes) => sim.set_pipes(pipes)?,
         Action::Write(values) => sim.command_batch(values)?,
         Action::DriverStatus {
             driver,

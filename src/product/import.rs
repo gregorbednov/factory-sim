@@ -104,6 +104,7 @@ fn import_data(
             .into(),
         size,
         mass,
+        liquid_capacity_l: None,
         geometry,
         mesh: Arc::new(mesh),
     };

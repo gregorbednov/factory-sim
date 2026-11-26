@@ -217,6 +217,9 @@ impl Demo {
                                         language.text(if on { "On" } else { "Off" }).to_owned()
                                     }
                                     Value::Int(value) => value.to_string(),
+                                    Value::Float(value) if tag.id.ends_with("flow_l_s") => {
+                                        format!("{value:.6}")
+                                    }
                                     Value::Float(value) => format!("{value:.3}"),
                                 };
                                 ui.monospace(text).on_hover_text(&tag.id);
@@ -247,6 +250,7 @@ impl Demo {
             return;
         };
         let mut writes = Vec::new();
+        let mut pipes = None;
         let changed = egui::ScrollArea::vertical()
             .id_salt(self.show_tags)
             .max_height(ui.available_height())
@@ -260,13 +264,24 @@ impl Demo {
                         if self.snapshot.running {
                             ui.label(language.text("Pause to edit properties"));
                         }
-                        inspector::properties(
+                        let part = inspector::properties(
                             ui,
                             language,
                             self.project(),
                             index,
                             !self.snapshot.running,
-                        )
+                        );
+                        pipes = inspector::pipes(
+                            ui,
+                            language,
+                            self.project(),
+                            id,
+                            !self.snapshot.running,
+                        );
+                        if let Some(error) = &self.tag_error {
+                            ui.colored_label(ui.visuals().error_fg_color, error);
+                        }
+                        part
                     }
                 })
                 .inner
@@ -282,6 +297,21 @@ impl Demo {
         }
         if let Some(part) = changed {
             self.edit().parts[index] = part;
+            ui.ctx().request_repaint();
+        }
+        if let Some(pipes) = pipes {
+            if let Some(project) = &mut self.draft {
+                project.pipes = pipes;
+            } else {
+                match self.sim.set_pipes(pipes) {
+                    Ok(()) => {
+                        self.unsaved = true;
+                        self.tag_error = None;
+                        self.refresh();
+                    }
+                    Err(error) => self.tag_error = Some(error.to_string()),
+                }
+            }
             ui.ctx().request_repaint();
         }
     }
