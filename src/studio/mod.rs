@@ -1,5 +1,7 @@
+mod editor_ui;
 mod geometry;
 mod i18n;
+mod inspector;
 mod library;
 mod production_ui;
 mod render;
@@ -16,27 +18,22 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::Datelike;
 use clap::ValueEnum;
+use editor_ui::{ACCENT, MUTE, TEXT, WARN, theme};
 use eframe::{
     egui::{self, Color32, RichText, Ui},
     egui_wgpu::{WgpuSetup, WgpuSetupCreateNew},
 };
 use i18n::Language;
+use inspector::parameter;
 use library::placement_height;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     product::{self, Product, UpAxis},
-    production::{Equipment, Production},
-    project::{Direction, Driver, Part, PartKind, Pipe, Project, Tag, Value},
+    project::{Direction, Driver, Part, PartKind, Project, Tag},
     runtime::{Action, Session},
     sim::{HZ, Quality, Snapshot},
 };
-
-const PANEL: Color32 = Color32::from_rgb(28, 34, 38);
-const TEXT: Color32 = Color32::from_rgb(226, 234, 233);
-const MUTE: Color32 = Color32::from_rgb(156, 173, 175);
-const ACCENT: Color32 = Color32::from_rgb(119, 227, 193);
-const WARN: Color32 = Color32::from_rgb(249, 192, 112);
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -163,24 +160,6 @@ pub fn open(
         }),
     )
     .map_err(|e| anyhow!("starting {} editor: {e}", backend.label()))
-}
-
-fn theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = PANEL;
-    visuals.window_fill = PANEL;
-    visuals.override_text_color = Some(TEXT);
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(37, 45, 50);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(42, 53, 58);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(54, 73, 77);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(53, 90, 81);
-    visuals.selection.bg_fill = Color32::from_rgb(52, 93, 81);
-    visuals.selection.stroke.color = ACCENT;
-    ctx.set_visuals(visuals);
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    });
 }
 
 enum Dialog {
@@ -700,37 +679,12 @@ impl Studio {
             });
         });
         ui.separator();
-        let mut remove = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for part in &self.project.parts {
-                ui.push_id(&part.id, |ui| {
-                    let selected = self.selection.as_deref() == Some(&part.id);
-                    let color = match part.kind {
-                        PartKind::Sensor { .. } | PartKind::Emitter { .. } => ACCENT,
-                        PartKind::Pusher { .. } | PartKind::Crate { .. } => WARN,
-                        _ => MUTE,
-                    };
-                    let row = ui.selectable_label(selected, RichText::new(&part.name).color(color));
-                    if row.clicked() {
-                        self.selection = Some(part.id.clone());
-                        self.show_tags = false;
-                    }
-                    row.context_menu(|ui| {
-                        if ui
-                            .add_enabled(
-                                !running,
-                                egui::Button::new(language.text("Remove object"))
-                                    .shortcut_text("Delete"),
-                            )
-                            .clicked()
-                        {
-                            remove = Some(part.id.clone());
-                            ui.close();
-                        }
-                    });
-                });
-            }
-        });
+        let mut selection = self.selection.clone();
+        let remove = editor_ui::scene_list(ui, language, &self.project, &mut selection, running);
+        if selection != self.selection {
+            self.selection = selection;
+            self.show_tags = false;
+        }
         if let Some(id) = remove {
             self.remove_part(&id);
         }
@@ -767,264 +721,16 @@ impl Studio {
                 );
                 return;
             };
-            let products = &self.project.products;
-            let production = &self.project.production;
-            let doors: Vec<_> = self
-                .project
-                .parts
-                .iter()
-                .filter(|part| {
-                    matches!(
-                        part.kind,
-                        PartKind::Equipment {
-                            equipment: Equipment::SafetyDoor,
-                            ..
-                        }
-                    )
-                })
-                .map(|part| (part.id.clone(), part.name.clone()))
-                .collect();
-            let robots: Vec<_> = self.project.parts.iter()
-                .filter(|part| matches!(part.kind, PartKind::Robot { .. }))
-                .map(|part| (part.id.clone(), part.name.clone()))
-                .collect();
-            let feed_belts: Vec<_> = self.project.parts.iter()
-                .filter(|part| part.kind.feed_surface().is_some())
-                .map(|part| (part.id.clone(), part.name.clone()))
-                .collect();
-            let unload_robot = self.project.parts.iter().any(|part| {
-                matches!(&part.kind, PartKind::Machine { machine } if machine.unload_robot.as_deref() == Some(id.as_str()))
-            });
-            let Some(part) = self.project.parts.iter_mut().find(|part| part.id == id) else {
+            let Some(index) = self.project.parts.iter().position(|part| part.id == id) else {
                 return;
             };
-            let mut changed = false;
-            ui.label(
-                RichText::new(language.text(part.kind.label()))
-                    .size(18.0)
-                    .strong(),
-            );
-            ui.label(RichText::new(&part.id).monospace().color(MUTE));
-            ui.add_enabled_ui(!snapshot.running, |ui| {
-                changed |= ui.text_edit_singleline(&mut part.name).changed();
-                ui.label(RichText::new(language.text("Position (m)")).color(MUTE));
-                changed |= dimensions(ui, &mut part.position, -1000.0..=1000.0);
-                changed |= parameter(
-                    ui,
-                    language.text("Yaw (°)"),
-                    &mut part.yaw,
-                    -360.0..=360.0,
-                    1.0,
-                );
-                if matches!(
-                    part.kind,
-                    PartKind::Emitter { emission: None, .. } | PartKind::Crate { .. }
-                ) {
-                    changed |= production_ui::product_picker(
-                        ui,
-                        language,
-                        "Product",
-                        &mut part.product,
-                        products,
-                        Some("Manual box"),
-                    );
-                }
-                match &mut part.kind {
-                    PartKind::Conveyor { size, speed } => {
-                        ui.label(
-                            RichText::new(language.text("Length / height / width")).color(MUTE),
-                        );
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(
-                            ui,
-                            language.text("Max speed (m/s)"),
-                            speed,
-                            0.02..=1000.0,
-                            0.05,
-                        );
-                    }
-                    PartKind::Pusher { stroke, speed } => {
-                        changed |=
-                            parameter(ui, language.text("Stroke (m)"), stroke, 0.02..=1000.0, 0.02);
-                        changed |=
-                            parameter(ui, language.text("Speed (m/s)"), speed, 0.02..=1000.0, 0.05);
-                    }
-                    PartKind::Sensor { range } => {
-                        changed |=
-                            parameter(ui, language.text("Range (m)"), range, 0.02..=1000.0, 0.02);
-                    }
-                    PartKind::Emitter {
-                        interval,
-                        size,
-                        mass,
-                        emission,
-                        random_spawn_belt,
-                    } => {
-                        changed |= parameter(
-                            ui,
-                            language.text("Interval (s)"),
-                            interval,
-                            0.02..=1000.0,
-                            0.05,
-                        );
-                        changed |= production_ui::emission(ui, language, emission, products);
-                        let before = random_spawn_belt.clone();
-                        let belt_name = feed_belts.iter()
-                            .find_map(|(id, name)| (Some(id) == before.as_ref()).then_some(name.as_str()))
-                            .unwrap_or(language.text("Fixed position"));
-                        egui::ComboBox::from_label(language.text("Random spawn on conveyor"))
-                            .selected_text(belt_name)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(random_spawn_belt, None, language.text("Fixed position"));
-                                for (id, name) in &feed_belts {
-                                    ui.selectable_value(random_spawn_belt, Some(id.clone()), name);
-                                }
-                            });
-                        changed |= before != *random_spawn_belt;
-                        if emission.is_none() && part.product.is_none() {
-                            changed |= parameter(
-                                ui,
-                                language.text("Mass (kg)"),
-                                mass,
-                                0.02..=1000.0,
-                                0.05,
-                            );
-                            changed |= dimensions(ui, size, 0.02..=1000.0);
-                        }
-                    }
-                    PartKind::Crate { size, mass } => {
-                        if part.product.is_none() {
-                            changed |= parameter(
-                                ui,
-                                language.text("Mass (kg)"),
-                                mass,
-                                0.02..=1000.0,
-                                0.05,
-                            );
-                            changed |= dimensions(ui, size, 0.02..=1000.0);
-                        }
-                    }
-                    PartKind::Equipment {
-                        equipment,
-                        size,
-                        scale_capacity,
-                    } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        if *equipment == Equipment::Scale {
-                            ui.horizontal(|ui| {
-                                changed |= ui
-                                    .selectable_value(scale_capacity, 20, language.text("20 kg"))
-                                    .changed();
-                                changed |= ui
-                                    .selectable_value(scale_capacity, 100, language.text("100 kg"))
-                                    .changed();
-                            });
-                        }
-                    }
-                    PartKind::Machine { machine } => {
-                        changed |= production_ui::machine(ui, language, machine, products, &doors, &robots)
-                    }
-                    PartKind::Robot { robot } => {
-                        if unload_robot {
-                            ui.label(language.text("This robot unloads machines automatically."));
-                        }
-                        changed |= production_ui::robot(ui, language, robot, unload_robot)
-                    }
-                    PartKind::Staff { staff } => {
-                        changed |= production_ui::staff(ui, language, staff, production)
-                    }
-                    PartKind::FlowGuide { length, height, inlet, outlet } => {
-                        for (label, value) in [
-                            ("Length (m)", length), ("Height (m)", height),
-                            ("Inlet width (m)", &mut *inlet),
-                        ] {
-                            changed |= parameter(ui, language.text(label), value, 0.02..=1000.0, 0.01);
-                        }
-                        if *outlet > *inlet {
-                            *outlet = *inlet;
-                            changed = true;
-                        }
-                        changed |= parameter(ui, language.text("Outlet width (m)"), outlet, 0.02..=*inlet, 0.01);
-                    }
-                    PartKind::HeatedTank(tank) => {
-                        changed |= dimensions(ui, &mut tank.size, 0.02..=1000.0);
-                        for (label, value) in [
-                            ("Initial water temperature (°C)", &mut tank.initial_temperature_c),
-                            ("Ambient temperature (°C)", &mut tank.ambient_temperature_c),
-                        ] {
-                            changed |= parameter(ui, language.text(label), value, 0.0..=99.9, 0.1);
-                        }
-                        for (label, value, min, speed) in [
-                            ("Working volume (L)", &mut tank.volume_l, 0.01, 0.1),
-                            ("Heat loss (W/K)", &mut tank.heat_loss_w_per_k, 0.0, 0.1),
-                            ("Maximum heater power (W)", &mut tank.heater_max_w, 0.01, 1.0),
-                        ] {
-                            changed |= parameter(ui, language.text(label), value, min..=f32::MAX, speed);
-                        }
-                        if tank.networked {
-                            let mut initial = tank.starting_volume_l().clamp(0.0, tank.volume_l);
-                            if parameter(ui, language.text("Initial water volume (L)"), &mut initial, 0.0..=tank.volume_l, 0.1)
-                                || tank.initial_volume_l.is_some_and(|volume| volume > tank.volume_l)
-                            {
-                                tank.initial_volume_l = Some(initial);
-                                changed = true;
-                            }
-                        } else {
-                            changed |= parameter(ui, language.text("Feed temperature (°C)"), &mut tank.feed_temperature_c, 0.0..=99.9, 0.1);
-                            changed |= parameter(ui, language.text("Maximum feed (L/s)"), &mut tank.feed_max_l_s, 0.0..=f32::MAX, 0.001);
-                        }
-                    }
-                    PartKind::WaterSource { size, temperature_c, max_flow_l_s, dirt_mg_l } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Water temperature (°C)"), temperature_c, 0.0..=99.9, 0.1);
-                        changed |= parameter(ui, language.text("Water dirt (mg/L)"), dirt_mg_l, 0.0..=f32::MAX, 1.0);
-                        changed |= parameter(ui, language.text("Maximum flow (L/s)"), max_flow_l_s, 0.0..=f32::MAX, 0.001);
-                    }
-                    PartKind::WaterPump { size, max_flow_l_s, shutoff_head_m, dirt_limit_mg } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Rated flow at zero head (L/s)"), max_flow_l_s, 0.0..=f32::MAX, 0.001);
-                        changed |= parameter(ui, language.text("Shutoff head (m)"), shutoff_head_m, f32::MIN_POSITIVE..=f32::MAX, 0.05);
-                        changed |= parameter(ui, language.text("Pump dirt limit (mg)"), dirt_limit_mg, 0.01..=f32::MAX, 1.0);
-                    }
-                    PartKind::WaterValve { size, max_flow_l_s, open_resistance } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Maximum flow (L/s)"), max_flow_l_s, 0.0..=f32::MAX, 0.001);
-                        changed |= parameter(ui, language.text("Fully open valve resistance"), open_resistance, 0.0..=f32::MAX, 0.1);
-                    }
-                    PartKind::WaterDrain { size, max_flow_l_s } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Maximum flow (L/s)"), max_flow_l_s, 0.0..=f32::MAX, 0.001);
-                    }
-                    PartKind::WaterJunction { size, .. } | PartKind::WaterInstrument { size, .. } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                    }
-                    PartKind::WaterFilter { size, clean_resistance, dirty_resistance, capacity_mg, efficiency_pct } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Clean filter resistance"), clean_resistance, 0.0..=*dirty_resistance, 0.1);
-                        changed |= parameter(ui, language.text("Loaded filter resistance"), dirty_resistance, *clean_resistance..=f32::MAX, 0.1);
-                        changed |= parameter(ui, language.text("Filter capacity (mg)"), capacity_mg, 0.01..=f32::MAX, 1.0);
-                        changed |= parameter(ui, language.text("Filter efficiency (%)"), efficiency_pct, 0.0..=100.0, 0.1);
-                    }
-                    PartKind::WaterHeater { size, max_power_w } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Maximum heater power (W)"), max_power_w, 0.01..=f32::MAX, 1.0);
-                    }
-                    PartKind::WaterHeatExchanger { size, conductance_w_k, resistance } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Thermal conductance (W/K)"), conductance_w_k, 0.01..=f32::MAX, 1.0);
-                        changed |= parameter(ui, language.text("Circuit resistance"), resistance, 0.0..=f32::MAX, 0.1);
-                    }
-                    PartKind::WaterFiller { size, max_flow_l_s, dose_l } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0);
-                        changed |= parameter(ui, language.text("Maximum flow (L/s)"), max_flow_l_s, 0.0001..=f32::MAX, 0.001);
-                        changed |= parameter(ui, language.text("Target dose (L)"), dose_l, 0.0001..=f32::MAX, 0.01);
-                    }
-                    PartKind::Remover { size } | PartKind::Barrier { size } => {
-                        changed |= dimensions(ui, size, 0.02..=1000.0)
-                    }
-                }
-            });
-            if changed {
+            if let Some(part) = ui
+                .push_id(&id, |ui| {
+                    inspector::properties(ui, language, &self.project, index, !snapshot.running)
+                })
+                .inner
+            {
+                self.project.parts[index] = part;
                 self.edit();
             }
             if ui
@@ -1038,7 +744,24 @@ impl Studio {
                 return;
             }
             ui.separator();
-            self.pipe_ports(ui, &id, snapshot.running);
+            if let Some(pipes) =
+                inspector::pipes(ui, language, &self.project, &id, !snapshot.running)
+            {
+                if self.dirty {
+                    self.project.pipes = pipes;
+                } else {
+                    let result = self
+                        .session
+                        .runtime
+                        .handle
+                        .execute(Action::SetPipes(pipes.clone()));
+                    if result.is_ok() {
+                        self.project.pipes = pipes;
+                        self.unsaved = true;
+                    }
+                    self.set_error(result);
+                }
+            }
             let prefix = format!("{id}.");
             for (tag_id, tag) in self.project.tags().range(prefix.clone()..) {
                 if !tag_id.starts_with(&prefix) {
@@ -1047,149 +770,6 @@ impl Studio {
                 self.tag_row(ui, tag, snapshot);
             }
         });
-    }
-
-    fn pipe_ports(&mut self, ui: &mut Ui, id: &str, running: bool) {
-        let language = self.settings.language;
-        for (outlet, label) in [(false, "Water inlet"), (true, "Water outlet")] {
-            let count = self
-                .project
-                .parts
-                .iter()
-                .find(|part| part.id == id)
-                .unwrap()
-                .kind
-                .water_port_count(outlet);
-            for port in 0..count {
-                let label_text = language.text(label);
-                if count > 1 {
-                    ui.label(format!("{} {}", label_text, port + 1));
-                } else {
-                    ui.label(label_text);
-                }
-                self.pipe_port(ui, id, running, outlet, port);
-            }
-        }
-    }
-
-    fn pipe_port(&mut self, ui: &mut Ui, id: &str, running: bool, outlet: bool, port: u8) {
-        let language = self.settings.language;
-        let link = self.project.pipes.iter().enumerate().find(|(_, pipe)| {
-            if outlet {
-                pipe.from == id && pipe.from_port == port
-            } else {
-                pipe.to == id && pipe.to_port == port
-            }
-        });
-        let mut connected = None;
-        let mut removed = None;
-        let mut updated = None;
-        if let Some((index, pipe)) = link {
-            let other_id = if outlet { &pipe.to } else { &pipe.from };
-            let other = self
-                .project
-                .parts
-                .iter()
-                .find(|part| &part.id == other_id)
-                .unwrap();
-            let other_port = if outlet { pipe.to_port } else { pipe.from_port };
-            ui.label(format!(
-                "{} ({}) · {}",
-                other.name,
-                other.id,
-                other_port + 1
-            ));
-            let mut resistance = pipe.resistance_per_m;
-            ui.add_enabled_ui(!running, |ui| {
-                if parameter(
-                    ui,
-                    language.text("Pipe resistance per metre"),
-                    &mut resistance,
-                    f32::MIN_POSITIVE..=f32::MAX,
-                    0.1,
-                ) {
-                    updated = Some((index, resistance));
-                }
-            });
-            if ui
-                .add_enabled(
-                    !running,
-                    egui::Button::new(language.text("Disconnect pipe")),
-                )
-                .clicked()
-            {
-                removed = Some(index);
-            }
-        } else {
-            ui.add_enabled_ui(!running, |ui| {
-                egui::ComboBox::from_id_salt((id, outlet, port))
-                    .selected_text(language.text("Connect pipe…"))
-                    .show_ui(ui, |ui| {
-                        let mut available = false;
-                        for other in &self.project.parts {
-                            for other_port in 0..other.kind.water_port_count(!outlet) {
-                                let mut pipe = if outlet {
-                                    Pipe::new(id, other.id.as_str())
-                                } else {
-                                    Pipe::new(other.id.as_str(), id)
-                                };
-                                (pipe.from_port, pipe.to_port) = if outlet {
-                                    (port, other_port)
-                                } else {
-                                    (other_port, port)
-                                };
-                                if self.project.can_connect_pipe(&pipe) {
-                                    available = true;
-                                    if ui
-                                        .selectable_label(
-                                            false,
-                                            format!(
-                                                "{} ({}) · {}",
-                                                other.name,
-                                                other.id,
-                                                other_port + 1
-                                            ),
-                                        )
-                                        .clicked()
-                                    {
-                                        connected = Some(pipe);
-                                    }
-                                }
-                            }
-                        }
-                        if !available {
-                            ui.label(language.text("No compatible free port"));
-                        }
-                    });
-            });
-        }
-        if connected.is_some() || removed.is_some() || updated.is_some() {
-            let mut pipes = self.project.pipes.clone();
-            if let Some(pipe) = connected {
-                pipes.push(pipe);
-            }
-            if let Some((index, resistance)) = updated {
-                pipes[index].resistance_per_m = resistance;
-            }
-            if let Some(index) = removed {
-                pipes.remove(index);
-            }
-            if self.dirty {
-                self.project.pipes = pipes;
-            } else {
-                let result = self
-                    .session
-                    .runtime
-                    .handle
-                    .execute(Action::SetPipes(pipes.clone()));
-                if result.is_ok() {
-                    self.project.pipes = pipes;
-                    self.unsaved = true;
-                }
-                self.set_error(result);
-            }
-        }
-        ui.separator();
     }
 
     fn tag_row(&mut self, ui: &mut Ui, tag: &Tag, snapshot: &Snapshot) {
@@ -1203,38 +783,13 @@ impl Studio {
         }
         ui.push_id(&tag.id, |ui| {
             ui.horizontal(|ui| {
-                let label = if let Some(name) = self.project.tag_names.get(&tag.id) {
-                    name
-                } else {
-                    language.text(
-                        tag.name
-                            .rsplit_once(" · ")
-                            .map_or(tag.name.as_str(), |(_, role)| role),
-                    )
-                };
+                let label = inspector::tag_label(language, &self.project, tag);
                 ui.label(label).on_hover_text(&tag.id);
                 if state.is_some_and(|state| state.quality == Quality::Stale) {
                     ui.label(RichText::new(language.text("Stale")).color(WARN));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_enabled_ui(enabled, |ui| match &mut value {
-                        Value::Bool(value) => {
-                            ui.checkbox(value, "");
-                        }
-                        Value::Float(value) => {
-                            let mut drag = egui::DragValue::new(value).speed(0.02).max_decimals(3);
-                            if tag.id.ends_with("flow_l_s") {
-                                drag = drag.min_decimals(4).max_decimals(6);
-                            }
-                            if let Some([lo, hi]) = tag.range {
-                                drag = drag.range(lo..=hi);
-                            }
-                            ui.add(drag);
-                        }
-                        Value::Int(value) => {
-                            ui.add(egui::DragValue::new(value));
-                        }
-                    });
+                    ui.add_enabled_ui(enabled, |ui| inspector::tag_input(ui, tag, &mut value));
                 });
             });
             if value != live {
@@ -1384,17 +939,7 @@ impl Studio {
                             );
                         }
                         if ui.button(language.text("Create empty project")).clicked() {
-                            let project = Project {
-                                version: crate::project::SCHEMA_VERSION,
-                                name: language.text("Untitled line").into(),
-                                production: Default::default(),
-                                parts: Vec::new(),
-                                pipes: Vec::new(),
-                                products: Default::default(),
-                                tag_names: Default::default(),
-                                initial_commands: Default::default(),
-                                drivers: Vec::new(),
-                            };
+                            let project = Project::empty(language.text("Untitled line"));
                             match Session::new(project.clone(), true) {
                                 Ok(session) => {
                                     self.project = project;
@@ -1517,37 +1062,17 @@ impl Studio {
                     .open(&mut open)
                     .default_width(600.0)
                     .show(ctx, |ui| {
-                        ui.label(language.text("Initial simulated date, seed and work calendars"));
-                        if ui.button(language.text("Add weekday calendar")).clicked() {
-                            match serde_json::from_str::<Production>(json) {
-                                Ok(mut settings) => {
-                                    let index = (1..).find(|i| !settings.calendars.contains_key(&format!("shift-{i}"))).unwrap();
-                                    let calendar = serde_json::from_str(r#"{"weekly":[{"days":[1,2,3,4,5],"start_minute":480,"end_minute":960}]}"#).unwrap();
-                                    settings.calendars.insert(format!("shift-{index}"), calendar);
-                                    *json = serde_json::to_string_pretty(&settings).unwrap();
-                                    *error = None;
-                                }
-                                Err(err) => *error = Some(err.to_string()),
-                            }
-                        }
-                        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                            ui.add(egui::TextEdit::multiline(json).code_editor().desired_rows(14).desired_width(f32::INFINITY));
-                        });
-                        if let Some(error) = error.as_ref() {
-                            ui.colored_label(WARN, language.error(error));
-                        }
-                        if ui.add_enabled(!snapshot.running, egui::Button::new(language.text("Apply production settings"))).clicked() {
-                            let result = (|| {
-                                let settings: Production = serde_json::from_str(json)?;
-                                let mut project = self.project.clone();
-                                project.production = settings;
-                                project.validate()?;
-                                self.project = project;
-                                self.edit();
-                                Ok::<_, anyhow::Error>(())
-                            })();
-                            *error = result.err().map(|err| format!("{err:#}"));
-                            done = error.is_none();
+                        if let Some(settings) = editor_ui::production(
+                            ui,
+                            language,
+                            &self.project,
+                            json,
+                            error,
+                            !snapshot.running,
+                        ) {
+                            self.project.production = settings;
+                            self.edit();
+                            done = true;
                         }
                     });
             }
@@ -1572,22 +1097,11 @@ impl Studio {
                         });
                         ui.separator();
                         let previous_quality = self.settings.graphics_quality;
-                        ui.label(language.text("Graphics quality"));
-                        let labels = ["Performance", "Balanced", "High quality"];
-                        let values = [
-                            render::GraphicsQuality::Performance,
-                            render::GraphicsQuality::Balanced,
-                            render::GraphicsQuality::High,
-                        ];
-                        ui.horizontal(|ui| {
-                            for (quality, label) in values.into_iter().zip(labels) {
-                                ui.radio_value(
-                                    &mut self.settings.graphics_quality,
-                                    quality,
-                                    language.text(label),
-                                );
-                            }
-                        });
+                        editor_ui::graphics_quality(
+                            ui,
+                            language,
+                            &mut self.settings.graphics_quality,
+                        );
                         ui.separator();
                         ui.label(format!(
                             "{} · {} · {}",
@@ -1862,39 +1376,6 @@ fn playback_button(ui: &mut Ui, label: &str, icon: PlaybackIcon, enabled: bool) 
         );
     }
     response.on_hover_text(label).on_disabled_hover_text(label)
-}
-
-fn dimensions(ui: &mut Ui, values: &mut [f32; 3], range: std::ops::RangeInclusive<f32>) -> bool {
-    ui.horizontal(|ui| {
-        let mut changed = false;
-        for (name, value) in ["X", "Y", "Z"].into_iter().zip(values) {
-            changed |= ui
-                .add(
-                    egui::DragValue::new(value)
-                        .prefix(format!("{name} "))
-                        .range(range.clone())
-                        .speed(0.02),
-                )
-                .changed();
-        }
-        changed
-    })
-    .inner
-}
-
-fn parameter(
-    ui: &mut Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    speed: f32,
-) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(value).range(range).speed(speed))
-            .changed()
-    })
-    .inner
 }
 
 #[cfg(test)]

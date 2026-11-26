@@ -3,63 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Производственная ячейка | Factory Sim</title>
-  <link rel="stylesheet" href="../assets/fonts/fonts.css">
-  <link rel="stylesheet" href="./demo.css">
-  <script type="module" src="./demo.js"></script>
+  <link rel="canonical" href="../app/">
+  <title>Factory Sim | Веб-приложение</title>
+  <script>location.replace("../app/" + location.search + location.hash);</script>
 </head>
 <body>
-  <main class="workbench">
-    <header class="toolbar">
-      <a class="home" href="../">Factory Sim</a>
-      <h1 id="project-name">Производственная ячейка</h1>
-      <div class="player" role="group" aria-label="Управление симуляцией">
-        <button id="playback" class="primary" type="button" aria-label="Пуск" title="Пуск" disabled>
-          <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path fill="currentColor" d="M7 4.5v15l12-7.5z"/>
-          </svg>
-          <svg id="pause-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
-            <path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/>
-          </svg>
-        </button>
-        <button id="step" type="button" aria-label="Один шаг симуляции" title="Один шаг симуляции" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path fill="currentColor" d="M5 5v14l11-7zM17 5h2v14h-2z"/>
-          </svg>
-        </button>
-        <button id="reset" type="button" aria-label="Сбросить симуляцию" title="Сбросить симуляцию" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M4 11a8 8 0 1 1 2.2 6.5M4 5v6h6" fill="none" stroke="currentColor"
-                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
-      </div>
-      <div class="commands" aria-label="Редактирование и файлы проекта">
-        <button id="library" type="button" aria-pressed="false" disabled>Библиотека элементов</button>
-        <button id="open" disabled>Открыть JSON</button>
-        <button id="save" disabled>Скачать JSON</button>
-        <input id="file" type="file" accept=".json,application/json" hidden>
-      </div>
-    </header>
-    <section class="stage" aria-label="Трёхмерная сцена">
-      <canvas id="scene" aria-label="Производственная линия. Перетаскивайте оборудование на паузе."></canvas>
-      <div id="splash" class="splash">
-        <img src="../assets/production-cell.webp" alt=""
-             width="780" height="560">
-        <div class="splash-message">
-          <p id="boot" role="status"></p>
-          <noscript>Для запуска симуляции необходим JavaScript.</noscript>
-        </div>
-      </div>
-    </section>
-    <footer class="status">
-      <p id="state">Загрузка</p>
-      <p id="graphics" hidden></p>
-      <p>Время <output id="time">0,0 с</output></p>
-      <p>Годные <output id="good">0</output></p>
-      <p>Брак <output id="scrap">0</output></p>
-      <p id="notice" role="status" hidden></p>
-    </footer>
-  </main>
+  <a href="../app/">Открыть веб-приложение Factory Sim</a>
 </body>
 </html>

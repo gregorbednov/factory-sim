@@ -48,7 +48,7 @@ pub struct Pipe {
 }
 
 impl Pipe {
-    #[cfg(any(feature = "studio", test))]
+    #[cfg(any(feature = "studio", feature = "web", test))]
     pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
         Self {
             from: from.into(),
@@ -650,7 +650,39 @@ impl Driver {
     }
 }
 
+impl Part {
+    /// The source must be above the assigned transport surface.
+    pub fn feed_station(&self, source: [f32; 3]) -> Option<[f32; 2]> {
+        let [length, height, width] = self.kind.feed_surface()?;
+        let (sin, cos) = self.yaw.to_radians().sin_cos();
+        let dx = source[0] - self.position[0];
+        let dz = source[2] - self.position[2];
+        let along = cos * dx - sin * dz;
+        let across = sin * dx + cos * dz;
+        let clearance = source[1] - (self.position[1] + height * 0.5);
+        (along.abs() <= length * 0.5
+            && across.abs() <= width * 0.5
+            && (0.0..=0.60).contains(&clearance))
+        .then_some([along, across])
+    }
+}
+
 impl Project {
+    #[cfg(any(feature = "studio", feature = "web"))]
+    pub fn empty(name: &str) -> Self {
+        Self {
+            version: SCHEMA_VERSION,
+            name: name.into(),
+            production: Default::default(),
+            parts: Vec::new(),
+            pipes: Vec::new(),
+            products: Default::default(),
+            tag_names: Default::default(),
+            initial_commands: Default::default(),
+            drivers: Vec::new(),
+        }
+    }
+
     pub fn product(&self, id: &str) -> Option<ProductSpec<'_>> {
         self.products.get(id).map(Product::spec).or_else(|| {
             BOXES
@@ -694,7 +726,7 @@ impl Project {
         project
     }
 
-    #[cfg(any(feature = "studio", test))]
+    #[cfg(any(feature = "studio", feature = "web", test))]
     pub fn remove_part(&mut self, id: &str) -> bool {
         let Some(index) = self.parts.iter().position(|part| part.id == id) else {
             return false;
@@ -781,7 +813,7 @@ impl Project {
         Ok(())
     }
 
-    #[cfg(feature = "studio")]
+    #[cfg(any(feature = "studio", feature = "web"))]
     pub fn can_connect_pipe(&self, pipe: &Pipe) -> bool {
         self.check_pipe(pipe, &self.pipes).is_ok()
     }
@@ -1335,6 +1367,29 @@ impl Project {
                 .with_context(|| format!("invalid product {id}"))?;
         }
         self.production.validate()?;
+        let mut product_recipes = BTreeMap::new();
+        for part in &self.parts {
+            if let PartKind::Machine { machine } = &part.kind {
+                let inputs = match &machine.assembly {
+                    Some(assembly) => assembly
+                        .bom
+                        .iter()
+                        .map(|row| (row.product.as_str(), row.count))
+                        .collect(),
+                    None => BTreeMap::from([(machine.input.as_str(), 1)]),
+                };
+                if let Some(previous) = product_recipes.get(machine.output.as_str()) {
+                    ensure!(
+                        previous == &inputs,
+                        "inconsistent bill of materials for product {} at {}",
+                        machine.output,
+                        part.id,
+                    );
+                } else {
+                    product_recipes.insert(machine.output.as_str(), inputs);
+                }
+            }
+        }
         let mut ids = BTreeSet::new();
         for part in &self.parts {
             ensure!(
@@ -1386,23 +1441,24 @@ impl Project {
                     if let Some(emission) = emission {
                         production::Emitter::new(emission)
                             .with_context(|| format!("emitter {}", part.id))?;
-                        let products: Vec<_> = match emission {
-                            Emission::Counts { rows, .. } => rows
-                                .iter()
-                                .filter_map(|row| row.product.as_deref())
-                                .collect(),
-                            Emission::Probability { rows } => rows
-                                .iter()
-                                .filter_map(|row| row.product.as_deref())
-                                .collect(),
-                        };
-                        for id in products {
-                            ensure!(
-                                self.product(id).is_some(),
-                                "{} has unknown emission product {id}",
-                                part.id
-                            );
-                        }
+                    }
+                    let source_products = part
+                        .product
+                        .as_deref()
+                        .filter(|_| emission.is_none())
+                        .into_iter()
+                        .chain(emission.iter().flat_map(Emission::products));
+                    for id in source_products {
+                        ensure!(
+                            self.product(id).is_some(),
+                            "{} has unknown emission product {id}",
+                            part.id
+                        );
+                        ensure!(
+                            !product_recipes.contains_key(id),
+                            "{} cannot emit manufactured product {id}; use its production recipe",
+                            part.id
+                        );
                     }
                     positive(&[interval, mass]) && positive(&size)
                 }
@@ -1764,6 +1820,67 @@ fn valid_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manufacturing_output_cannot_be_emitted_directly() {
+        let base = serde_json::json!({
+            "version": 1, "name": "Material flow",
+            "parts": [
+                {"id":"center","name":"Machine","kind":"machine","position":[0,0.6,0],"machine":{}},
+                {"id":"source","name":"Source","kind":"emitter","position":[-2,0.85,0],
+                 "size":[0.25,0.12,0.34],"interval":1,"mass":1.25,"product":"raw-blank"}
+            ]
+        });
+        let project: Project = serde_json::from_value(base.clone()).unwrap();
+        project.validate().unwrap();
+        let variants = [
+            serde_json::json!(null),
+            serde_json::json!({"mode":"counts","rows":[{"product":"machined-base","count":1}]}),
+            serde_json::json!({"mode":"probability","rows":[{"product":"machined-base","probability":1.0}]}),
+        ];
+        for emission in variants {
+            let mut project = base.clone();
+            let source = &mut project["parts"][1];
+            source["product"] = serde_json::json!(if emission.is_null() {
+                "machined-base"
+            } else {
+                "raw-blank"
+            });
+            source["emission"] = emission;
+            let project: Project = serde_json::from_value(project).unwrap();
+            let error = project.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("cannot emit manufactured product machined-base"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn assembly_tables_for_the_same_product_must_agree_on_component_counts() {
+        let mut project = serde_json::json!({"version":1,"name":"BOM","parts":[]});
+        let table = |id: &str, mode: &str, bom| {
+            serde_json::json!({
+                "id":id,"name":id,"kind":"machine","position":[0,0.6,0],
+                "machine":{"output":"assembled-product","assembly":{"mode":mode,"bom":bom}}
+            })
+        };
+        let base = serde_json::json!({"product":"machined-base","count":2});
+        let lid = serde_json::json!({"product":"machined-lid","count":1});
+        project["parts"] = serde_json::json!([
+            table("manual", "manual", serde_json::json!([base, lid])),
+            table("auto", "automatic", serde_json::json!([lid, base])),
+        ]);
+        let valid: Project = serde_json::from_value(project.clone()).unwrap();
+        valid.validate().unwrap();
+        project["parts"][1]["machine"]["assembly"]["bom"][1]["count"] = serde_json::json!(3);
+        let invalid: Project = serde_json::from_value(project).unwrap();
+        let error = invalid.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("inconsistent bill of materials for product assembled-product"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn removing_a_part_removes_only_its_tag_configuration() -> Result<()> {

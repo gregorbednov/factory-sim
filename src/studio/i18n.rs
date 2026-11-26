@@ -45,7 +45,17 @@ impl Language {
             "Import 3D model…" => "Импорт 3D-модели…",
             "Remove object" => "Удалить объект",
             "Inspector" => "Свойства",
+            "Pause to edit properties" => "Поставьте симуляцию на паузу, чтобы изменить свойства.",
             "All tags" => "Все теги",
+            "Tags" => "Теги",
+            "Commands" => "Команды",
+            "On" => "Вкл",
+            "Off" => "Выкл",
+            "No tags for this object" => "У этого объекта нет тегов.",
+            "Run or step to apply scene changes and read live tags." => {
+                "Нажмите «Пуск» или «Шаг», чтобы применить изменения сцены и открыть текущие теги."
+            }
+            "Tag command failed" => "Команда не выполнена",
             "Select a scene object to edit its properties and watch its tags." => {
                 "Выберите объект на сцене, чтобы изменить его свойства и посмотреть теги."
             }
@@ -278,6 +288,13 @@ impl Language {
             "Inlet width (m)" => "Ширина входа (м)",
             "Outlet width (m)" => "Ширина выхода (м)",
             "Random spawn on conveyor" => "Случайная подача на конвейер",
+            "Conveyor outside the feed area" => "Конвейер вне зоны подачи",
+            "Choose a product without a production recipe for the emitter." => {
+                "Для источника выберите изделие без производственного рецепта в этом проекте."
+            }
+            "Place the emitter above its conveyor to resume feeding." => {
+                "Разместите источник над конвейером, чтобы возобновить подачу."
+            }
             "Fixed position" => "Фиксированное положение",
             "Spawn blocked" => "Подача заблокирована",
             "Length (m)" => "Длина (м)",

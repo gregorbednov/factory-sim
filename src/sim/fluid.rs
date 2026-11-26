@@ -273,7 +273,7 @@ impl Network {
         }
     }
 
-    #[cfg(feature = "studio")]
+    #[cfg(any(feature = "studio", feature = "web"))]
     pub fn reconnect(&mut self, project: &Project) {
         let mut network = Self::new(project);
         for (id, service) in &mut network.services {

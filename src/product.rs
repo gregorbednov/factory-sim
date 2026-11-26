@@ -3,10 +3,14 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "studio")]
+#[cfg(any(feature = "studio", feature = "web"))]
 mod import;
+#[cfg(any(feature = "studio", feature = "web"))]
+pub use import::UpAxis;
 #[cfg(feature = "studio")]
-pub use import::{UpAxis, import};
+pub use import::import;
+#[cfg(feature = "web")]
+pub use import::import_bytes;
 
 pub const MAX_TRIANGLES: usize = 250_000;
 

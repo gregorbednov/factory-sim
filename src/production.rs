@@ -75,6 +75,10 @@ impl Equipment {
     }
 }
 
+pub fn emitter_opening(product_width: f32) -> f32 {
+    product_width.max(0.55) * 1.35
+}
+
 pub const CHUTE_SLOPE: f32 = 8.0_f32.to_radians();
 
 pub fn chute_rails([length, height, width]: [f32; 3]) -> [([f32; 3], [f32; 3]); 2] {
@@ -449,6 +453,23 @@ pub enum Emission {
     Probability {
         rows: Vec<ProbabilityRow>,
     },
+}
+
+impl Emission {
+    pub fn products(&self) -> impl Iterator<Item = &str> {
+        let (counts, probabilities) = match self {
+            Self::Counts { rows, .. } => (rows.as_slice(), &[][..]),
+            Self::Probability { rows } => (&[][..], rows.as_slice()),
+        };
+        counts
+            .iter()
+            .filter_map(|row| row.product.as_deref())
+            .chain(
+                probabilities
+                    .iter()
+                    .filter_map(|row| row.product.as_deref()),
+            )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

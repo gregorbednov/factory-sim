@@ -424,6 +424,7 @@ impl Simulation {
                 ref emission,
                 ref random_spawn_belt,
                 interval,
+                size,
                 ..
             } => {
                 if let Some(belt) = random_spawn_belt {
@@ -433,9 +434,20 @@ impl Simulation {
                         .iter()
                         .find(|part| &part.id == belt)
                         .unwrap();
+                    let width = part
+                        .product
+                        .as_deref()
+                        .and_then(|id| self.project.product(id))
+                        .map_or(size[2], |model| model.size[2]);
                     self.random_feeds.insert(
                         part.id.clone(),
-                        feed::RandomFeed::new(self.project.production.seed, part, belt, interval),
+                        feed::RandomFeed::new(
+                            self.project.production.seed,
+                            part,
+                            belt,
+                            interval,
+                            width,
+                        ),
                     );
                 }
                 if let Some(config) = emission {
@@ -832,7 +844,7 @@ impl Simulation {
         }
     }
 
-    #[cfg(feature = "studio")]
+    #[cfg(any(feature = "studio", feature = "web"))]
     pub fn set_pipes(&mut self, pipes: Vec<crate::project::Pipe>) -> Result<()> {
         ensure!(!self.running, "pause the simulation before changing pipes");
         let mut project = self.project.clone();
