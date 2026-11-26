@@ -35,6 +35,7 @@ struct Demo {
     sim: Simulation,
     draft: Option<Project>,
     library: Option<library::Library>,
+    selection: Option<String>,
     snapshot: Snapshot,
     context: Context,
     last_frame: Option<f64>,
@@ -49,6 +50,7 @@ impl Demo {
             sim,
             draft: None,
             library: None,
+            selection: None,
             context: Context::default(),
             last_frame: None,
             pending_ticks: 0.0,
@@ -112,6 +114,19 @@ impl Demo {
             kind: entry.kind,
         });
         id
+    }
+
+    fn can_remove_selection(&self) -> bool {
+        !self.sim.running && self.library.is_none() && self.selection.is_some()
+    }
+
+    fn remove_selection(&mut self) {
+        if self.can_remove_selection()
+            && let Some(id) = self.selection.take()
+        {
+            self.edit().remove_part(&id);
+            self.context.request_repaint();
+        }
     }
 
     fn refresh(&mut self) {
@@ -186,6 +201,10 @@ impl WebDemo {
         Ok(())
     }
 
+    pub fn remove_selected(&self) {
+        self.demo.borrow_mut().remove_selection();
+    }
+
     pub fn reset(&self) -> Result<(), JsValue> {
         let project = self.demo.borrow().project().clone();
         self.swap_simulation(Simulation::new(project).map_err(js_error)?);
@@ -216,7 +235,7 @@ impl WebDemo {
         serde_json::json!({
             "running": snap.running, "tick": snap.tick, "seconds": snap.elapsed_seconds,
             "name": demo.project().name, "edited": demo.draft.is_some(),
-            "library_open": demo.library.is_some(),
+            "library_open": demo.library.is_some(), "can_remove": demo.can_remove_selection(),
             "good": count("good_exit.count"), "scrap": count("reject_exit.count")
         })
         .to_string()
@@ -233,6 +252,7 @@ impl WebDemo {
         demo.sim = sim;
         demo.draft = None;
         demo.library = None;
+        demo.selection = None;
         demo.last_frame = None;
         demo.pending_ticks = 0.0;
         demo.refresh();
@@ -243,7 +263,6 @@ struct WebStudio {
     demo: Rc<RefCell<Demo>>,
     camera: Camera,
     object_drag: Option<ObjectDrag>,
-    selection: Option<String>,
     quality: render::GraphicsQuality,
 }
 
@@ -251,7 +270,7 @@ impl eframe::App for WebStudio {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let mut demo = self.demo.borrow_mut();
         demo.advance(ui.input(|input| input.time));
-        if demo.snapshot.running {
+        if demo.snapshot.running || demo.selection.is_none() {
             self.object_drag = None;
         }
         let mut placed = None;
@@ -265,13 +284,13 @@ impl eframe::App for WebStudio {
                     self.quality,
                     demo.project(),
                     &demo.snapshot,
-                    self.selection.as_deref(),
+                    demo.selection.as_deref(),
                     demo.draft.is_some(),
                     !demo.snapshot.running,
                     &mut self.object_drag,
                 );
                 if let Some(selection) = interaction.selection {
-                    self.selection = selection;
+                    demo.selection = selection;
                 }
                 if let Some((entry, at)) = interaction.library_drop {
                     placed = Some((entry, Some(at)));
@@ -310,9 +329,22 @@ impl eframe::App for WebStudio {
             }
         }
         if let Some((entry, at)) = placed {
-            self.selection = Some(demo.place(entry, at));
+            demo.selection = Some(demo.place(entry, at));
             demo.library = None;
             ui.ctx().request_repaint();
+        }
+
+        let ctx = ui.ctx();
+        if demo.can_remove_selection()
+            && !ctx.text_edit_focused()
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input_mut(|input| {
+                input.modifiers.is_none()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+            })
+        {
+            self.object_drag = None;
+            demo.remove_selection();
         }
     }
 }
@@ -372,7 +404,6 @@ pub async fn start_demo(
                     demo: state,
                     camera: Camera::default(),
                     object_drag: None,
-                    selection: None,
                     quality: if webgl {
                         render::GraphicsQuality::Performance
                     } else {

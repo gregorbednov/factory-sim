@@ -1,5 +1,5 @@
 const byId = (id) => document.getElementById(id);
-const controls = ["playback", "step", "reset", "library", "open", "save"];
+const controls = ["playback", "step", "reset", "library", "remove", "open", "save"];
 const playback = byId("playback");
 const formatTime = new Intl.NumberFormat("ru", { minimumFractionDigits: 1, maximumFractionDigits: 3 });
 const notice = byId("notice");
@@ -47,7 +47,7 @@ async function boot() {
     const current = demo.status();
     if (current === last) return;
     last = current;
-    const { seconds, name, edited, good, scrap, library_open, running: isRunning } = JSON.parse(current);
+    const { seconds, name, edited, good, scrap, library_open, can_remove, running: isRunning } = JSON.parse(current);
     running = isRunning;
     const nextAction = running ? "Пауза" : "Пуск";
     playback.disabled = false;
@@ -59,6 +59,7 @@ async function boot() {
     byId("reset").disabled = false;
     byId("library").disabled = running;
     byId("library").setAttribute("aria-pressed", library_open);
+    byId("remove").disabled = !can_remove;
     byId("open").disabled = running;
     byId("save").disabled = running;
     byId("state").textContent = running ? "В работе" : edited ? "Пауза. Пуск или шаг применит изменения" : "На паузе";
@@ -83,6 +84,7 @@ async function boot() {
   playback.addEventListener("click", action(() => demo.set_running(!running)));
   byId("step").addEventListener("click", action(() => demo.step()));
   byId("library").addEventListener("click", action(() => demo.toggle_library()));
+  byId("remove").addEventListener("click", action(() => demo.remove_selected()));
   byId("reset").addEventListener("click", action(() => demo.reset()));
   byId("open").addEventListener("click", () => byId("file").click());
   byId("file").addEventListener("change", action(async () => {

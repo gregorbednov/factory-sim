@@ -359,7 +359,7 @@ impl Project {
         project
     }
 
-    #[cfg(any(feature = "studio", test))]
+    #[cfg(any(feature = "studio", feature = "web", test))]
     pub fn remove_part(&mut self, id: &str) -> bool {
         let Some(index) = self.parts.iter().position(|part| part.id == id) else {
             return false;
