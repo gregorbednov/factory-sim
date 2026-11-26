@@ -47,6 +47,15 @@ impl Language {
             "Inspector" => "Свойства",
             "Pause to edit properties" => "Поставьте симуляцию на паузу, чтобы изменить свойства.",
             "All tags" => "Все теги",
+            "Tags" => "Теги",
+            "Commands" => "Команды",
+            "On" => "Вкл",
+            "Off" => "Выкл",
+            "No tags for this object" => "У этого объекта нет тегов.",
+            "Run or step to apply scene changes and read live tags." => {
+                "Нажмите «Пуск» или «Шаг», чтобы применить изменения сцены и открыть текущие теги."
+            }
+            "Tag command failed" => "Команда не выполнена",
             "Select a scene object to edit its properties and watch its tags." => {
                 "Выберите объект на сцене, чтобы изменить его свойства и посмотреть теги."
             }

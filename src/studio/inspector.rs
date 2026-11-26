@@ -3,7 +3,7 @@ use eframe::egui::{self, RichText, Ui};
 use super::{i18n::Language, production_ui};
 use crate::{
     production::Equipment,
-    project::{Part, PartKind, Project},
+    project::{Part, PartKind, Project, Tag, Value},
 };
 
 pub(super) fn properties(
@@ -208,6 +208,37 @@ pub(super) fn properties(
         }
     });
     (editable && changed).then_some(part)
+}
+
+pub(super) fn tag_label<'a>(language: Language, project: &'a Project, tag: &'a Tag) -> &'a str {
+    project.tag_names.get(&tag.id).map_or_else(
+        || {
+            language.text(
+                tag.name
+                    .rsplit_once(" · ")
+                    .map_or(&tag.name, |(_, role)| role),
+            )
+        },
+        String::as_str,
+    )
+}
+
+pub(super) fn tag_input(ui: &mut Ui, tag: &Tag, value: &mut Value) {
+    match value {
+        Value::Bool(value) => {
+            ui.checkbox(value, "");
+        }
+        Value::Float(value) => {
+            let mut drag = egui::DragValue::new(value).speed(0.02).max_decimals(3);
+            if let Some([lo, hi]) = tag.range {
+                drag = drag.range(lo..=hi);
+            }
+            ui.add(drag);
+        }
+        Value::Int(value) => {
+            ui.add(egui::DragValue::new(value));
+        }
+    }
 }
 
 pub(super) fn dimensions(

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     product::{self, Product, UpAxis},
     production::Production,
-    project::{Direction, Driver, Part, PartKind, Project, Tag, Value},
+    project::{Direction, Driver, Part, PartKind, Project, Tag},
     runtime::{Action, Session},
     sim::{HZ, Quality, Snapshot},
 };
@@ -813,35 +813,13 @@ impl Studio {
         }
         ui.push_id(&tag.id, |ui| {
             ui.horizontal(|ui| {
-                let label = if let Some(name) = self.project.tag_names.get(&tag.id) {
-                    name
-                } else {
-                    language.text(
-                        tag.name
-                            .rsplit_once(" · ")
-                            .map_or(tag.name.as_str(), |(_, role)| role),
-                    )
-                };
+                let label = inspector::tag_label(language, &self.project, tag);
                 ui.label(label).on_hover_text(&tag.id);
                 if state.is_some_and(|state| state.quality == Quality::Stale) {
                     ui.label(RichText::new(language.text("Stale")).color(WARN));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_enabled_ui(enabled, |ui| match &mut value {
-                        Value::Bool(value) => {
-                            ui.checkbox(value, "");
-                        }
-                        Value::Float(value) => {
-                            let mut drag = egui::DragValue::new(value).speed(0.02).max_decimals(3);
-                            if let Some([lo, hi]) = tag.range {
-                                drag = drag.range(lo..=hi);
-                            }
-                            ui.add(drag);
-                        }
-                        Value::Int(value) => {
-                            ui.add(egui::DragValue::new(value));
-                        }
-                    });
+                    ui.add_enabled_ui(enabled, |ui| inspector::tag_input(ui, tag, &mut value));
                 });
             });
             if value != live {

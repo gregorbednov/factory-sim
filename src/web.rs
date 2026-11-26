@@ -29,7 +29,7 @@ use wasm_bindgen::prelude::*;
 
 use i18n::Language;
 use production::Equipment;
-use project::{Part, PartKind, Project, Value};
+use project::{Direction, Part, PartKind, Project, Value};
 use sim::{HZ, Simulation, Snapshot};
 use viewport::{Camera, ObjectDrag};
 
@@ -41,6 +41,8 @@ struct Demo {
     library: Option<library::Library>,
     selection: Option<String>,
     inspector_open: bool,
+    show_tags: bool,
+    tag_error: Option<String>,
     snapshot: Snapshot,
     context: Context,
     last_frame: Option<f64>,
@@ -57,6 +59,8 @@ impl Demo {
             library: None,
             selection: None,
             inspector_open: false,
+            show_tags: false,
+            tag_error: None,
             context: Context::default(),
             last_frame: None,
             pending_ticks: 0.0,
@@ -136,6 +140,78 @@ impl Demo {
         }
     }
 
+    fn show_tags(
+        &self,
+        ui: &mut egui::Ui,
+        language: Language,
+        id: &str,
+        writes: &mut Vec<(String, Value)>,
+    ) {
+        if self.draft.is_some() {
+            ui.label(language.text("Run or step to apply scene changes and read live tags."));
+            return;
+        }
+
+        let prefix = format!("{id}.");
+        let states = || {
+            self.snapshot
+                .tags
+                .range(prefix.clone()..)
+                .take_while(|(tag_id, _)| tag_id.starts_with(&prefix))
+        };
+        if states().next().is_none() {
+            ui.label(language.text("No tags for this object"));
+            return;
+        }
+        if let Some(error) = &self.tag_error {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("{} · {error}", language.text("Tag command failed")),
+            );
+        }
+        for (direction, title) in [
+            (Direction::Actuator, "Commands"),
+            (Direction::Sensor, "Sensors"),
+        ] {
+            let tags = states()
+                .map(|(_, state)| state)
+                .filter(|state| state.tag.direction == direction);
+            let mut tags = tags.peekable();
+            if tags.peek().is_none() {
+                continue;
+            }
+            ui.strong(language.text(title));
+            for state in tags {
+                let tag = &state.tag;
+                ui.push_id(&tag.id, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(inspector::tag_label(language, self.project(), tag))
+                            .on_hover_text(&tag.id);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if direction == Direction::Actuator {
+                                let mut value = state.value;
+                                inspector::tag_input(ui, tag, &mut value);
+                                if value != state.value {
+                                    writes.push((tag.id.clone(), value));
+                                }
+                            } else {
+                                let text = match state.value {
+                                    Value::Bool(on) => {
+                                        language.text(if on { "On" } else { "Off" }).to_owned()
+                                    }
+                                    Value::Int(value) => value.to_string(),
+                                    Value::Float(value) => format!("{value:.3}"),
+                                };
+                                ui.monospace(text).on_hover_text(&tag.id);
+                            }
+                        });
+                    });
+                });
+            }
+            ui.add_space(6.0);
+        }
+    }
+
     fn show_inspector(&mut self, ctx: &Context) {
         if !self.inspector_open {
             return;
@@ -152,31 +228,58 @@ impl Demo {
         let language = Language::Russian;
         let width = (ctx.content_rect().width() - 28.0).clamp(150.0, 338.0);
         let mut open = true;
+        let mut show_tags = self.show_tags;
+        let mut writes = Vec::new();
+        let max_height = (ctx.content_rect().height() - 88.0).clamp(100.0, 440.0);
         let changed = egui::Window::new(language.text("Inspector"))
             .open(&mut open)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
             .default_width(width)
             .max_width(width)
-            .max_height((ctx.content_rect().height() - 64.0).max(100.0))
             .resizable(false)
-            .vscroll(true)
             .show(ctx, |ui| {
-                if self.snapshot.running {
-                    ui.label(language.text("Pause to edit properties"));
-                }
-                ui.push_id(id, |ui| {
-                    inspector::properties(
-                        ui,
-                        language,
-                        self.project(),
-                        index,
-                        !self.snapshot.running,
-                    )
-                })
-                .inner
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut show_tags, false, language.text("Inspector"));
+                    ui.selectable_value(&mut show_tags, true, language.text("Tags"));
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt(show_tags)
+                    .max_height(max_height)
+                    .show(ui, |ui| {
+                        ui.push_id(id, |ui| {
+                            if show_tags {
+                                ui.label(&self.project().parts[index].name);
+                                self.show_tags(ui, language, id, &mut writes);
+                                None
+                            } else {
+                                if self.snapshot.running {
+                                    ui.label(language.text("Pause to edit properties"));
+                                }
+                                inspector::properties(
+                                    ui,
+                                    language,
+                                    self.project(),
+                                    index,
+                                    !self.snapshot.running,
+                                )
+                            }
+                        })
+                        .inner
+                    })
+                    .inner
             })
             .and_then(|window| window.inner.flatten());
         self.inspector_open = open;
+        self.show_tags = show_tags;
+        if !writes.is_empty() {
+            self.tag_error = self
+                .sim
+                .command_batch(writes)
+                .err()
+                .map(|error| error.to_string());
+            self.refresh();
+        }
         if let Some(part) = changed {
             self.edit().parts[index] = part;
             ctx.request_repaint();
@@ -321,6 +424,8 @@ impl WebDemo {
         demo.library = None;
         demo.selection = None;
         demo.inspector_open = false;
+        demo.show_tags = false;
+        demo.tag_error = None;
         demo.last_frame = None;
         demo.pending_ticks = 0.0;
         demo.refresh();
