@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "name": "Flow alignment",
+  "production": { "seed": 94 },
+  "parts": [
+    { "id": "line", "name": "Feed conveyor", "kind": "conveyor",
+      "position": [0.0, 0.59, 0.0], "size": [7.0, 0.22, 1.0], "speed": 0.8 },
+    { "id": "source", "name": "Random feed", "kind": "emitter",
+      "position": [-2.9, 0.85, 0.0], "interval": 1.5,
+      "random_spawn_belt": "line", "size": [0.38, 0.13, 0.22], "mass": 1.0 },
+    { "id": "guide", "name": "Passive flow guide", "kind": "flow_guide",
+      "position": [0.0, 0.80, 0.0], "length": 3.4, "height": 0.18, "inlet": 0.96, "outlet": 0.44 },
+    { "id": "exit", "name": "Exit", "kind": "remover",
+      "position": [3.22, 0.80, 0.0], "size": [0.25, 0.45, 0.64] }
+  ],
+  "initial_commands": { "source.enabled": true }
+}

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Запустите производственную ячейку со станком и роботом в браузере.">
+  <title>Factory Sim. Симулятор производственных линий</title>
+  <link rel="stylesheet" href="./assets/fonts/fonts.css">
+  <link rel="stylesheet" href="./site.css">
+</head>
+<body>
+  <header class="masthead">
+    <div class="container masthead-inner">
+      <a class="wordmark" href="./" aria-label="Factory Sim, главная">Factory Sim</a>
+      <a href="#workcell">Как устроена демка</a>
+    </div>
+  </header>
+  <main>
+    <section class="hero container">
+      <div class="intro-copy">
+        <h1>Запустите свою линию</h1>
+        <p class="lead">Станок и робот сортируют изделия на линии, которую можно перестроить.</p>
+        <a class="button" href="./demo/">Попробовать онлайн</a>
+      </div>
+      <figure class="hero-figure">
+        <img src="./assets/production-cell.webp" width="780" height="560" fetchpriority="high"
+             alt="Входные ролики ведут к станку. Робот переносит изделия на конвейеры годных деталей и брака.">
+        <figcaption>Производственная ячейка в Factory Sim</figcaption>
+      </figure>
+    </section>
+
+    <section id="workcell" class="container routes">
+      <h2>Маршрут детали</h2>
+      <dl>
+        <div><dt>Подача</dt><dd>Заготовки попадают на ролики под разными углами. Направляющие выравнивают поток.</dd></div>
+        <div><dt>Обработка</dt><dd>Станок обрабатывает заготовку. Следующая ждёт, пока робот освободит рабочую зону.</dd></div>
+        <div><dt>Сортировка</dt><dd>Робот раскладывает годные детали и брак по разным конвейерам.</dd></div>
+      </dl>
+    </section>
+
+    <section class="container editing">
+      <h2>Перестройте участок</h2>
+      <dl class="edit-commands">
+        <div><dt>Пауза</dt><dd>Остановите симуляцию, чтобы изменить расположение.</dd></div>
+        <div><dt>Мышь или Ctrl</dt><dd>Перетащите оборудование. Ctrl отключает привязку входов и выходов.</dd></div>
+        <div><dt>Скачать JSON</dt><dd>Сохраните свою сцену, чтобы открыть её в Factory Sim.</dd></div>
+      </dl>
+    </section>
+
+    <section class="ready">
+      <div class="container ready-inner">
+        <h2>Попробуйте на своём компьютере</h2>
+        <div>
+          <p>Для демки нужен браузер с WebGPU. Симуляция работает в браузере без подключения к ПЛК.</p>
+          <a class="button" href="./demo/">Открыть демку</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="masthead">
+    <div class="container masthead-inner">
+      <a class="wordmark" href="./">Factory Sim</a>
+      <a href="./demo/">Производственная ячейка</a>
+    </div>
+  </footer>
+</body>
+</html>

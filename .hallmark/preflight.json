@@ -1,0 +1,11 @@
+{
+  "scanned": "2026-11-26",
+  "findings": {
+    "product": "Factory Sim Studio, Rust and eframe, native WebGPU-compatible renderer",
+    "material": "Real product capture of examples/production-cell.json",
+    "audience": "Visitors evaluating a production line simulator",
+    "job": "Try the production cell online"
+  },
+  "preserve": ["Factory Sim name", "existing production-cell equipment and visual vocabulary"],
+  "introduce": ["Wayfind light theme", "relative GitHub Pages paths", "browser workbench"]
+}

@@ -1,0 +1,26 @@
+[
+ {
+  "shape": "Narrative Workflow",
+  "theme": "wayfind",
+  "axes": "light/mono/cool",
+  "hero": "Settled",
+  "nav": "banner",
+  "footer": "index",
+  "imagery": "real product capture",
+  "photos": [],
+  "entry": "web/index.html",
+  "fingerprint": "ce4963",
+  "sections": [
+   "hero",
+   "material flow",
+   "edit the layout",
+   "web requirements",
+   "footer"
+  ],
+  "signature": "full workcell with the good and scrap conveyor split",
+  "waived": [],
+  "prompt": "Factory Sim online production-cell simulator, try the demo",
+  "date": "2026-11-26",
+  "mode": "build"
+ }
+]

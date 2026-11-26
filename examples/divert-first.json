@@ -1,0 +1,5 @@
+[
+  { "tick": 0, "tag": "supply.enabled", "value": false },
+  { "tick": 380, "tag": "diverter.extend", "value": true },
+  { "tick": 520, "tag": "diverter.extend", "value": false }
+]

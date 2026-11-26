@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Производственная ячейка | Factory Sim</title>
+  <link rel="stylesheet" href="../assets/fonts/fonts.css">
+  <link rel="stylesheet" href="./demo.css">
+  <script type="module" src="./demo.js"></script>
+</head>
+<body>
+  <main class="workbench">
+    <header class="toolbar">
+      <a class="home" href="../">Factory Sim</a>
+      <h1 id="project-name">Производственная ячейка</h1>
+      <div class="commands" aria-label="Управление симуляцией">
+        <button id="run" class="primary" disabled>Пуск</button>
+        <button id="pause" disabled>Пауза</button>
+        <button id="reset" disabled>Сброс</button>
+      </div>
+      <div class="commands" aria-label="Файлы проекта">
+        <button id="open" disabled>Открыть JSON</button>
+        <button id="save" disabled>Скачать JSON</button>
+        <input id="file" type="file" accept=".json,application/json" hidden>
+      </div>
+    </header>
+    <section class="stage" aria-label="Трёхмерная сцена">
+      <canvas id="scene" aria-label="Производственная линия. Перетаскивайте оборудование на паузе."></canvas>
+      <div id="splash" class="splash">
+        <img src="../assets/production-cell.webp" alt=""
+             width="780" height="560">
+        <div class="splash-message">
+          <p id="boot" role="status"></p>
+          <noscript>Для запуска симуляции необходим JavaScript.</noscript>
+        </div>
+      </div>
+    </section>
+    <footer class="status">
+      <p id="state">Загрузка</p>
+      <p>Время <output id="time">0,0 с</output></p>
+      <p>Годные <output id="good">0</output></p>
+      <p>Брак <output id="scrap">0</output></p>
+      <p id="notice" role="status" hidden></p>
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "name": "Parcel sorting",
+  "parts": [
+    {"id":"feed","name":"Infeed belt","position":[-3.25,0.60,0],"kind":"conveyor","size":[3.5,0.22,1.15],"speed":1},
+    {"id":"main","name":"Through belt","position":[1.0,0.60,0],"kind":"conveyor","size":[5,0.22,1.15],"speed":1},
+    {"id":"branch","name":"Side belt","position":[0.45,0.60,2.15],"yaw":-90,"kind":"conveyor","size":[3.2,0.22,1.15],"speed":1},
+    {"id":"scanner","name":"Parcel detector","position":[-0.85,0.91,-0.66],"yaw":-90,"kind":"sensor","range":1.32},
+    {"id":"diverter","name":"Sorting pusher","position":[0.45,0.94,-0.95],"kind":"pusher","stroke":1.45,"speed":1.6},
+    {"id":"supply","name":"Parcel supply","position":[-4.4,1.22,0],"kind":"emitter","interval":2.1,"size":[0.42,0.38,0.46],"mass":2.0},
+    {"id":"exit","name":"Through exit","position":[3.35,0.97,0],"kind":"remover","size":[0.3,1.0,1.2]},
+    {"id":"side_exit","name":"Side exit","position":[0.45,0.97,3.6],"kind":"remover","size":[1.2,1.0,0.3]},
+    {"id":"parcel","name":"Initial parcel","position":[-3.05,1.12,0],"kind":"crate","size":[0.42,0.38,0.46],"mass":2.0},
+    {"id":"guide","name":"Infeed guard","position":[-2.15,0.82,0.63],"kind":"barrier","size":[2.7,0.24,0.07]}
+  ],
+  "tag_names": {"scanner.detected":"Parcel at scanner"},
+  "initial_commands": {"supply.enabled":true},
+  "drivers": [
+    {
+      "id":"modbus_server","enabled":false,"protocol":"modbus_server","address":"127.0.0.1:1502",
+      "bindings":[
+        {"tag":"diverter.extend","area":"coil","address":0},
+        {"tag":"scanner.detected","area":"discrete_input","address":0},
+        {"tag":"diverter.front","area":"discrete_input","address":1},
+        {"tag":"diverter.back","area":"discrete_input","address":2},
+        {"tag":"main.target_speed","area":"holding_register","address":0},
+        {"tag":"main.speed","area":"input_register","address":0},
+        {"tag":"exit.count","area":"input_register","address":1}
+      ]
+    },
+    {
+      "id":"modbus_client","enabled":false,"protocol":"modbus_client","address":"127.0.0.1:1502",
+      "bindings":[
+        {"tag":"diverter.extend","area":"discrete_input","address":0},
+        {"tag":"scanner.detected","area":"coil","address":0},
+        {"tag":"diverter.front","area":"coil","address":1},
+        {"tag":"diverter.back","area":"coil","address":2},
+        {"tag":"main.target_speed","area":"input_register","address":0},
+        {"tag":"main.speed","area":"holding_register","address":0},
+        {"tag":"exit.count","area":"holding_register","address":1}
+      ]
+    },
+    {
+      "id":"opcua","enabled":false,"protocol":"opc_ua_client","endpoint":"opc.tcp://127.0.0.1:4840/",
+      "bindings":[
+        {"tag":"diverter.extend","node":"ns=2;s=Extend"},
+        {"tag":"scanner.detected","node":"ns=2;s=Detected"},
+        {"tag":"main.target_speed","node":"ns=2;s=TargetSpeed"},
+        {"tag":"main.speed","node":"ns=2;s=BeltSpeed"},
+        {"tag":"exit.count","node":"ns=2;s=Count"}
+      ]
+    }
+  ]
+}

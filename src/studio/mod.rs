@@ -1,0 +1,1688 @@
+mod geometry;
+mod i18n;
+mod production_ui;
+mod render;
+mod snap;
+mod viewport;
+
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, TryRecvError},
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result, anyhow};
+use chrono::Datelike;
+use clap::ValueEnum;
+use eframe::{
+    egui::{self, Color32, RichText, Ui},
+    egui_wgpu::{WgpuSetup, WgpuSetupCreateNew},
+};
+use i18n::Language;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    product::{self, BOXES, Product, UpAxis},
+    production::{Equipment, Production},
+    project::{Direction, Driver, Part, PartKind, Project, Tag, Value},
+    runtime::{Action, Session},
+    sim::{HZ, Quality, Snapshot},
+};
+
+const PANEL: Color32 = Color32::from_rgb(28, 34, 38);
+const TEXT: Color32 = Color32::from_rgb(226, 234, 233);
+const MUTE: Color32 = Color32::from_rgb(156, 173, 175);
+const ACCENT: Color32 = Color32::from_rgb(119, 227, 193);
+const WARN: Color32 = Color32::from_rgb(249, 192, 112);
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Backend {
+    #[default]
+    Vulkan,
+    #[cfg(not(target_os = "macos"))]
+    #[value(name = "opengl")]
+    OpenGl,
+}
+
+impl Backend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vulkan => "Vulkan",
+            #[cfg(not(target_os = "macos"))]
+            Self::OpenGl => "OpenGL",
+        }
+    }
+
+    fn flags(self) -> wgpu::Backends {
+        match self {
+            Self::Vulkan => wgpu::Backends::VULKAN,
+            #[cfg(not(target_os = "macos"))]
+            Self::OpenGl => wgpu::Backends::GL,
+        }
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct Settings {
+    backend: Backend,
+    #[serde(default)]
+    language: Language,
+    #[serde(default)]
+    graphics_quality: render::GraphicsQuality,
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let dir = if cfg!(target_os = "windows") {
+        env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support"))
+    } else {
+        env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    };
+    dir.map(|dir| dir.join("factory-sim").join("studio.json"))
+}
+
+pub fn open(
+    path: Option<PathBuf>,
+    backend: Option<Backend>,
+    fps_limit: Option<u32>,
+    run: bool,
+) -> Result<()> {
+    let path_for_settings = settings_path();
+    let settings = path_for_settings
+        .as_ref()
+        .filter(|path| path.exists())
+        .map(|path| -> Result<Settings> { Ok(serde_json::from_slice(&fs::read(path)?)?) })
+        .transpose()?
+        .unwrap_or_default();
+    let backend = backend.unwrap_or(settings.backend);
+    let project = if let Some(path) = &path {
+        Project::load(path)?
+    } else {
+        Project::demo()
+    };
+    let session = Session::new(project.clone(), true)?;
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = backend.flags();
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1320.0, 820.0])
+            .with_min_inner_size([880.0, 560.0]),
+        renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: WgpuSetup::CreateNew(setup),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Factory Sim",
+        options,
+        Box::new(move |cc| {
+            theme(&cc.egui_ctx);
+            let gpu = cc
+                .wgpu_render_state
+                .as_ref()
+                .map(|state| {
+                    render::install(state);
+                    let adapter = state.adapter.get_info();
+                    log::info!("Studio graphics: {:?} · {}", adapter.backend, adapter.name);
+                    adapter.name
+                })
+                .unwrap_or_else(|| "GPU".to_owned());
+            if run {
+                session.runtime.handle.execute(Action::Run)?;
+            }
+            Ok(Box::new(Studio {
+                project,
+                session,
+                backend,
+                settings,
+                path_for_settings,
+                path,
+                gpu,
+                selection: None,
+                camera: viewport::Camera::default(),
+                object_drag: None,
+                dirty: false,
+                unsaved: false,
+                notice: None,
+                dialog: None,
+                serial: 0,
+                show_tags: false,
+                shown: false,
+                fps_limit,
+                rates: Rates::default(),
+            }))
+        }),
+    )
+    .map_err(|e| anyhow!("starting {} editor: {e}", backend.label()))
+}
+
+fn theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = PANEL;
+    visuals.window_fill = PANEL;
+    visuals.override_text_color = Some(TEXT);
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(37, 45, 50);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(42, 53, 58);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(54, 73, 77);
+    visuals.widgets.active.bg_fill = Color32::from_rgb(53, 90, 81);
+    visuals.selection.bg_fill = Color32::from_rgb(52, 93, 81);
+    visuals.selection.stroke.color = ACCENT;
+    ctx.set_visuals(visuals);
+    ctx.style_mut_of(egui::Theme::Dark, |style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    });
+}
+
+enum Dialog {
+    New,
+    File {
+        action: FileAction,
+        path: String,
+        error: Option<String>,
+    },
+    ConfirmOpen(PathBuf),
+    Drivers {
+        json: String,
+        error: Option<String>,
+    },
+    Production {
+        json: String,
+        error: Option<String>,
+    },
+    Import(ImportProduct),
+    Settings,
+}
+
+enum FileAction {
+    Open,
+    Save { then_open: Option<PathBuf> },
+}
+
+const PROJECT_COMMANDS: [&str; 6] = ["New", "Open", "Save", "I/O", "Production", "Settings"];
+
+struct ImportProduct {
+    path: String,
+    units: Option<Units>,
+    up: Option<UpAxis>,
+    mass: f32,
+    pending: Option<Receiver<Result<Product>>>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Units {
+    Millimeters,
+    Centimeters,
+    Meters,
+    Inches,
+}
+
+impl Units {
+    fn label(self, language: Language) -> &'static str {
+        language.text(match self {
+            Self::Millimeters => "Millimeters",
+            Self::Centimeters => "Centimeters",
+            Self::Meters => "Meters",
+            Self::Inches => "Inches",
+        })
+    }
+
+    fn scale(self) -> f64 {
+        match self {
+            Self::Millimeters => 0.001,
+            Self::Centimeters => 0.01,
+            Self::Meters => 1.0,
+            Self::Inches => 0.0254,
+        }
+    }
+}
+
+impl Default for ImportProduct {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            units: None,
+            up: None,
+            mass: 2.0,
+            pending: None,
+            error: None,
+        }
+    }
+}
+
+impl ImportProduct {
+    fn show(&mut self, ui: &mut Ui, paused: bool, language: Language) -> Option<Product> {
+        if let Some(pending) = &self.pending
+            && paused
+        {
+            match pending.try_recv() {
+                Ok(Ok(product)) => return Some(product),
+                Ok(Err(error)) => {
+                    self.pending = None;
+                    self.error = Some(format!("{error:#}"));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.pending = None;
+                    self.error = Some("The model importer stopped unexpectedly".into());
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        ui.add_enabled_ui(self.pending.is_none(), |ui| {
+            if let Some(path) = ui.input(|input| {
+                input
+                    .raw
+                    .dropped_files
+                    .first()
+                    .map(|file| file.path().to_path_buf())
+            }) {
+                self.path = path.to_string_lossy().into_owned();
+            }
+            ui.label(language.text("STEP (.step, .stp), OBJ or STL"));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.path)
+                    .hint_text(language.text("Model file path"))
+                    .desired_width(f32::INFINITY),
+            );
+            let path = PathBuf::from(self.path.trim());
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let obj = extension == "obj";
+            let default_units = if obj {
+                Units::Meters
+            } else {
+                Units::Millimeters
+            };
+            let default_up = if obj { UpAxis::Y } else { UpAxis::Z };
+            let mut units = self.units.unwrap_or(default_units);
+            let mut up = self.up.unwrap_or(default_up);
+            ui.horizontal(|ui| {
+                ui.label(language.text("File units"));
+                egui::ComboBox::from_id_salt("import-units")
+                    .selected_text(units.label(language))
+                    .show_ui(ui, |ui| {
+                        for option in [
+                            Units::Millimeters,
+                            Units::Centimeters,
+                            Units::Meters,
+                            Units::Inches,
+                        ] {
+                            if ui
+                                .selectable_value(&mut units, option, option.label(language))
+                                .clicked()
+                            {
+                                self.units = Some(option);
+                            }
+                        }
+                    });
+                ui.label(language.text("Up axis"));
+                if ui.selectable_value(&mut up, UpAxis::Y, "Y").clicked() {
+                    self.up = Some(UpAxis::Y);
+                }
+                if ui.selectable_value(&mut up, UpAxis::Z, "Z").clicked() {
+                    self.up = Some(UpAxis::Z);
+                }
+            });
+            parameter(
+                ui,
+                language.text("Mass (kg)"),
+                &mut self.mass,
+                0.001..=1000.0,
+                0.05,
+            );
+            if ui
+                .add_enabled(
+                    paused && !self.path.trim().is_empty(),
+                    egui::Button::new(language.text("Import and place")),
+                )
+                .clicked()
+            {
+                let (send, receive) = mpsc::channel();
+                let context = ui.ctx().clone();
+                let mass = self.mass;
+                let job = std::thread::Builder::new()
+                    .name("product-import".into())
+                    .spawn(move || {
+                        let _ = send.send(product::import(&path, units.scale(), up, mass));
+                        context.request_repaint();
+                    });
+                self.error = job.as_ref().err().map(ToString::to_string);
+                if job.is_ok() {
+                    self.pending = Some(receive);
+                }
+            }
+        });
+        if self.pending.is_some() && paused {
+            ui.spinner();
+        }
+        if !paused {
+            ui.label(language.text("Pause the simulation to add the product."));
+        }
+        if let Some(error) = &self.error {
+            ui.colored_label(WARN, language.error(error));
+        }
+        None
+    }
+}
+
+struct Studio {
+    project: Project,
+    session: Session,
+    backend: Backend,
+    settings: Settings,
+    path_for_settings: Option<PathBuf>,
+    path: Option<PathBuf>,
+    gpu: String,
+    selection: Option<String>,
+    camera: viewport::Camera,
+    object_drag: Option<viewport::ObjectDrag>,
+    dirty: bool,
+    unsaved: bool,
+    notice: Option<(String, bool)>,
+    dialog: Option<Dialog>,
+    serial: u64,
+    show_tags: bool,
+    shown: bool,
+    fps_limit: Option<u32>,
+    rates: Rates,
+}
+
+#[derive(Default)]
+struct Rates {
+    start: Option<(Instant, u64)>,
+    frames: u32,
+    measured: Option<(f64, f64)>,
+}
+
+impl Rates {
+    fn sample(&mut self, snapshot: &Snapshot, now: Instant) {
+        if !snapshot.running {
+            *self = Self::default();
+            return;
+        }
+        let (start, tick) = *self.start.get_or_insert((now, snapshot.tick));
+        if snapshot.tick < tick {
+            *self = Self::default();
+            return;
+        }
+        self.frames += 1;
+        let elapsed = now.duration_since(start).as_secs_f64();
+        if elapsed >= 1.0 {
+            let fps = f64::from(self.frames.saturating_sub(1)) / elapsed;
+            let hz = (snapshot.tick - tick) as f64 / elapsed;
+            self.measured = Some((fps, hz));
+            log::debug!("viewport {:.1} FPS; simulation {:.1} Hz", fps, hz);
+            self.start = Some((now, snapshot.tick));
+            self.frames = 1;
+        }
+    }
+}
+
+impl Studio {
+    fn set_error(&mut self, result: Result<()>) {
+        if let Err(e) = result {
+            self.notice = Some((e.to_string(), true));
+        }
+    }
+
+    fn edit(&mut self) {
+        self.dirty = true;
+        self.unsaved = true;
+    }
+
+    fn apply_edits(&mut self) -> Result<()> {
+        if self.dirty {
+            let session = Session::new(self.project.clone(), true)?;
+            self.session = session;
+            self.dirty = false;
+        }
+        Ok(())
+    }
+
+    fn action(&mut self, action: Action) {
+        let result = self
+            .apply_edits()
+            .and_then(|()| self.session.runtime.handle.execute(action));
+        self.set_error(result);
+    }
+
+    fn add_part(&mut self, kind: PartKind, product: Option<&str>) {
+        let id = loop {
+            self.serial += 1;
+            let id = format!("part-{}", self.serial);
+            if !self.project.parts.iter().any(|part| part.id == id) {
+                break id;
+            }
+        };
+        let spec = product.and_then(|id| self.project.product(id));
+        let name = spec
+            .map_or_else(
+                || self.settings.language.text(kind.label()),
+                |spec| {
+                    if product.is_some_and(|id| self.project.products.contains_key(id)) {
+                        spec.name
+                    } else {
+                        self.settings.language.text(spec.name)
+                    }
+                },
+            )
+            .to_owned();
+        let y = spec.map_or_else(
+            || match kind {
+                PartKind::Equipment {
+                    equipment: Equipment::Fence | Equipment::SafetyDoor | Equipment::StackLight,
+                    size,
+                    ..
+                } => size[1] * 0.5,
+                PartKind::Staff { .. } | PartKind::Robot { .. } => 0.0,
+                PartKind::FlowGuide { height, .. } => 0.71 + height * 0.5,
+                _ => 0.6,
+            },
+            |spec| 0.02 + spec.size[1] * 0.5,
+        );
+        let x = (self.serial % 5) as f32 - 2.0;
+        self.project.parts.push(Part {
+            id: id.clone(),
+            name,
+            position: [x, y, -2.2],
+            product: product.map(str::to_owned),
+            yaw: 0.0,
+            kind,
+        });
+        self.selection = Some(id);
+        self.show_tags = false;
+        self.edit();
+    }
+
+    fn add_product(&mut self, id: &str) {
+        if let Some(spec) = self.project.product(id) {
+            self.add_part(
+                PartKind::Crate {
+                    size: spec.size,
+                    mass: spec.mass,
+                },
+                Some(id),
+            );
+        }
+    }
+
+    fn remove_part(&mut self, id: &str) {
+        if self.session.runtime.handle.snapshot().running || !self.project.remove_part(id) {
+            return;
+        }
+        if self.selection.as_deref() == Some(id) {
+            self.selection = None;
+        }
+        self.edit();
+    }
+
+    fn top(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
+        let language = self.settings.language;
+        ui.add_space(7.0);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Factory Sim")
+                    .size(22.0)
+                    .strong()
+                    .color(ACCENT),
+            );
+            ui.separator();
+            let mut title_rect = ui.available_rect_before_wrap();
+            title_rect.set_width(title_rect.width().min(180.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(title_rect), |ui| {
+                ui.add(egui::Label::new(RichText::new(&self.project.name).size(15.0)).truncate());
+            });
+            if self.unsaved {
+                let (_, indicator) =
+                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter()
+                    .circle_filled(indicator.rect.center(), 3.0, WARN);
+                indicator.on_hover_text(language.text("Unsaved project"));
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    !snapshot.running,
+                    egui::Button::new(language.text("Run")).fill(Color32::from_rgb(49, 87, 77)),
+                )
+                .clicked()
+            {
+                self.action(Action::Run);
+            }
+            if ui
+                .add_enabled(snapshot.running, egui::Button::new(language.text("Pause")))
+                .clicked()
+            {
+                self.action(Action::Pause);
+            }
+            if ui
+                .add_enabled(!snapshot.running, egui::Button::new(language.text("Step")))
+                .clicked()
+            {
+                self.action(Action::Step(1));
+            }
+            if ui.button(language.text("Reset")).clicked() {
+                self.action(Action::Reset);
+            }
+            let spacing = ui.spacing();
+            let button_font = egui::TextStyle::Button.resolve(ui.style());
+            let command_width = PROJECT_COMMANDS
+                .iter()
+                .map(|label| {
+                    let text_width = ui
+                        .painter()
+                        .layout_no_wrap(language.text(label).to_owned(), button_font.clone(), TEXT)
+                        .size()
+                        .x;
+                    (text_width + 2.0 * spacing.button_padding.x)
+                        .max(spacing.interact_size.x)
+                        .ceil()
+                        + spacing.item_spacing.x
+                })
+                .sum::<f32>();
+            let compact = ui.available_width() < command_width;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if compact {
+                    ui.menu_button(language.text("Menu"), |ui| {
+                        for command in PROJECT_COMMANDS {
+                            if ui.button(language.text(command)).clicked() {
+                                self.project_command(command);
+                                ui.close();
+                            }
+                        }
+                    });
+                } else {
+                    for command in PROJECT_COMMANDS.into_iter().rev() {
+                        if ui.button(language.text(command)).clicked() {
+                            self.project_command(command);
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    fn project_command(&mut self, command: &str) {
+        self.dialog = Some(match command {
+            "New" => Dialog::New,
+            "Open" => Dialog::File {
+                action: FileAction::Open,
+                path: self.project_path_text(""),
+                error: None,
+            },
+            "Save" => self.save_dialog(None),
+            "I/O" => Dialog::Drivers {
+                json: serde_json::to_string_pretty(&self.project.drivers).unwrap(),
+                error: None,
+            },
+            "Production" => Dialog::Production {
+                json: serde_json::to_string_pretty(&self.project.production).unwrap(),
+                error: None,
+            },
+            "Settings" => Dialog::Settings,
+            _ => unreachable!("unknown toolbar command"),
+        });
+    }
+
+    fn project_path_text(&self, fallback: &str) -> String {
+        self.path
+            .as_ref()
+            .map_or_else(|| fallback.to_owned(), |path| path.display().to_string())
+    }
+
+    fn save_dialog(&self, then_open: Option<PathBuf>) -> Dialog {
+        Dialog::File {
+            action: FileAction::Save { then_open },
+            path: self.project_path_text("line.json"),
+            error: None,
+        }
+    }
+
+    fn save_project(&mut self, path: &Path) -> Result<()> {
+        self.project.save(path)?;
+        self.path = Some(path.to_owned());
+        self.unsaved = false;
+        Ok(())
+    }
+
+    fn open_project(&mut self, path: &Path) -> Result<()> {
+        let project = Project::load(path)?;
+        let session = Session::new(project.clone(), true)?;
+        self.project = project;
+        self.session = session;
+        self.path = Some(path.to_owned());
+        self.selection = None;
+        self.dirty = false;
+        self.unsaved = false;
+        self.camera = viewport::Camera::default();
+        self.object_drag = None;
+        Ok(())
+    }
+
+    fn resume_open(&mut self, path: PathBuf) {
+        if let Err(error) = self.open_project(&path) {
+            self.dialog = Some(Dialog::File {
+                action: FileAction::Open,
+                path: path.display().to_string(),
+                error: Some(error.to_string()),
+            });
+        }
+    }
+
+    fn left(&mut self, ui: &mut Ui, running: bool) {
+        let language = self.settings.language;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(language.text("Scene")).size(19.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_enabled_ui(!running, |ui| {
+                    ui.menu_button(language.text("+ Add"), |ui| {
+                        for kind in palette() {
+                            if ui.button(language.text(kind.label())).clicked() {
+                                self.add_part(kind, None);
+                                ui.close();
+                            }
+                        }
+                        ui.menu_button(language.text("Equipment"), |ui| {
+                            for part in production_ui::equipment_palette() {
+                                if ui.button(language.text(part.label())).clicked() {
+                                    self.add_part(part, None);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.menu_button(language.text("Stations and staff"), |ui| {
+                            for part in production_ui::station_palette() {
+                                if ui.button(language.text(part.label())).clicked() {
+                                    self.add_part(part, None);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.menu_button(language.text("Products"), |ui| {
+                            let mut selected = None;
+                            for (id, spec) in &BOXES {
+                                if ui.button(language.text(spec.name)).clicked() {
+                                    selected = Some((*id).to_owned());
+                                }
+                            }
+                            for (id, product) in &self.project.products {
+                                if ui.button(&product.name).clicked() {
+                                    selected = Some(id.clone());
+                                }
+                            }
+                            if let Some(id) = selected {
+                                self.add_product(&id);
+                                ui.close_kind(egui::UiKind::Menu);
+                            }
+                            ui.separator();
+                            if ui.button(language.text("Import 3D model…")).clicked() {
+                                self.dialog = Some(Dialog::Import(ImportProduct::default()));
+                                ui.close_kind(egui::UiKind::Menu);
+                            }
+                        });
+                    });
+                });
+            });
+        });
+        ui.separator();
+        let mut remove = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for part in &self.project.parts {
+                ui.push_id(&part.id, |ui| {
+                    let selected = self.selection.as_deref() == Some(&part.id);
+                    let color = match part.kind {
+                        PartKind::Sensor { .. } | PartKind::Emitter { .. } => ACCENT,
+                        PartKind::Pusher { .. } | PartKind::Crate { .. } => WARN,
+                        _ => MUTE,
+                    };
+                    let row = ui.selectable_label(selected, RichText::new(&part.name).color(color));
+                    if row.clicked() {
+                        self.selection = Some(part.id.clone());
+                        self.show_tags = false;
+                    }
+                    row.context_menu(|ui| {
+                        if ui
+                            .add_enabled(
+                                !running,
+                                egui::Button::new(language.text("Remove object"))
+                                    .shortcut_text("Delete"),
+                            )
+                            .clicked()
+                        {
+                            remove = Some(part.id.clone());
+                            ui.close();
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(id) = remove {
+            self.remove_part(&id);
+        }
+    }
+
+    fn right(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
+        let language = self.settings.language;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.show_tags, false, language.text("Inspector"));
+            ui.selectable_value(&mut self.show_tags, true, language.text("All tags"));
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if self.show_tags {
+                if self.dirty {
+                    for tag in self.project.tags().values() {
+                        self.tag_row(ui, tag, snapshot);
+                    }
+                } else {
+                    for state in snapshot.tags.values() {
+                        self.tag_row(ui, &state.tag, snapshot);
+                    }
+                }
+                return;
+            }
+            let Some(id) = self.selection.clone() else {
+                ui.label(
+                    RichText::new(
+                        language.text(
+                            "Select a scene object to edit its properties and watch its tags.",
+                        ),
+                    )
+                    .color(MUTE),
+                );
+                return;
+            };
+            let products = &self.project.products;
+            let production = &self.project.production;
+            let doors: Vec<_> = self
+                .project
+                .parts
+                .iter()
+                .filter(|part| {
+                    matches!(
+                        part.kind,
+                        PartKind::Equipment {
+                            equipment: Equipment::SafetyDoor,
+                            ..
+                        }
+                    )
+                })
+                .map(|part| (part.id.clone(), part.name.clone()))
+                .collect();
+            let robots: Vec<_> = self.project.parts.iter()
+                .filter(|part| matches!(part.kind, PartKind::Robot { .. }))
+                .map(|part| (part.id.clone(), part.name.clone()))
+                .collect();
+            let feed_belts: Vec<_> = self.project.parts.iter()
+                .filter(|part| part.kind.feed_surface().is_some())
+                .map(|part| (part.id.clone(), part.name.clone()))
+                .collect();
+            let unload_robot = self.project.parts.iter().any(|part| {
+                matches!(&part.kind, PartKind::Machine { machine } if machine.unload_robot.as_deref() == Some(id.as_str()))
+            });
+            let Some(part) = self.project.parts.iter_mut().find(|part| part.id == id) else {
+                return;
+            };
+            let mut changed = false;
+            ui.label(
+                RichText::new(language.text(part.kind.label()))
+                    .size(18.0)
+                    .strong(),
+            );
+            ui.label(RichText::new(&part.id).monospace().color(MUTE));
+            ui.add_enabled_ui(!snapshot.running, |ui| {
+                changed |= ui.text_edit_singleline(&mut part.name).changed();
+                ui.label(RichText::new(language.text("Position (m)")).color(MUTE));
+                changed |= dimensions(ui, &mut part.position, -1000.0..=1000.0);
+                changed |= parameter(
+                    ui,
+                    language.text("Yaw (°)"),
+                    &mut part.yaw,
+                    -360.0..=360.0,
+                    1.0,
+                );
+                if matches!(
+                    part.kind,
+                    PartKind::Emitter { emission: None, .. } | PartKind::Crate { .. }
+                ) {
+                    changed |= production_ui::product_picker(
+                        ui,
+                        language,
+                        "Product",
+                        &mut part.product,
+                        products,
+                        Some("Manual box"),
+                    );
+                }
+                match &mut part.kind {
+                    PartKind::Conveyor { size, speed } => {
+                        ui.label(
+                            RichText::new(language.text("Length / height / width")).color(MUTE),
+                        );
+                        changed |= dimensions(ui, size, 0.02..=1000.0);
+                        changed |= parameter(
+                            ui,
+                            language.text("Max speed (m/s)"),
+                            speed,
+                            0.02..=1000.0,
+                            0.05,
+                        );
+                    }
+                    PartKind::Pusher { stroke, speed } => {
+                        changed |=
+                            parameter(ui, language.text("Stroke (m)"), stroke, 0.02..=1000.0, 0.02);
+                        changed |=
+                            parameter(ui, language.text("Speed (m/s)"), speed, 0.02..=1000.0, 0.05);
+                    }
+                    PartKind::Sensor { range } => {
+                        changed |=
+                            parameter(ui, language.text("Range (m)"), range, 0.02..=1000.0, 0.02);
+                    }
+                    PartKind::Emitter {
+                        interval,
+                        size,
+                        mass,
+                        emission,
+                        random_spawn_belt,
+                    } => {
+                        changed |= parameter(
+                            ui,
+                            language.text("Interval (s)"),
+                            interval,
+                            0.02..=1000.0,
+                            0.05,
+                        );
+                        changed |= production_ui::emission(ui, language, emission, products);
+                        let before = random_spawn_belt.clone();
+                        let belt_name = feed_belts.iter()
+                            .find_map(|(id, name)| (Some(id) == before.as_ref()).then_some(name.as_str()))
+                            .unwrap_or(language.text("Fixed position"));
+                        egui::ComboBox::from_label(language.text("Random spawn on conveyor"))
+                            .selected_text(belt_name)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(random_spawn_belt, None, language.text("Fixed position"));
+                                for (id, name) in &feed_belts {
+                                    ui.selectable_value(random_spawn_belt, Some(id.clone()), name);
+                                }
+                            });
+                        changed |= before != *random_spawn_belt;
+                        if emission.is_none() && part.product.is_none() {
+                            changed |= parameter(
+                                ui,
+                                language.text("Mass (kg)"),
+                                mass,
+                                0.02..=1000.0,
+                                0.05,
+                            );
+                            changed |= dimensions(ui, size, 0.02..=1000.0);
+                        }
+                    }
+                    PartKind::Crate { size, mass } => {
+                        if part.product.is_none() {
+                            changed |= parameter(
+                                ui,
+                                language.text("Mass (kg)"),
+                                mass,
+                                0.02..=1000.0,
+                                0.05,
+                            );
+                            changed |= dimensions(ui, size, 0.02..=1000.0);
+                        }
+                    }
+                    PartKind::Equipment {
+                        equipment,
+                        size,
+                        scale_capacity,
+                    } => {
+                        changed |= dimensions(ui, size, 0.02..=1000.0);
+                        if *equipment == Equipment::Scale {
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .selectable_value(scale_capacity, 20, language.text("20 kg"))
+                                    .changed();
+                                changed |= ui
+                                    .selectable_value(scale_capacity, 100, language.text("100 kg"))
+                                    .changed();
+                            });
+                        }
+                    }
+                    PartKind::Machine { machine } => {
+                        changed |= production_ui::machine(ui, language, machine, products, &doors, &robots)
+                    }
+                    PartKind::Robot { robot } => {
+                        if unload_robot {
+                            ui.label(language.text("This robot unloads machines automatically."));
+                        }
+                        changed |= production_ui::robot(ui, language, robot, unload_robot)
+                    }
+                    PartKind::Staff { staff } => {
+                        changed |= production_ui::staff(ui, language, staff, production)
+                    }
+                    PartKind::FlowGuide { length, height, inlet, outlet } => {
+                        for (label, value) in [
+                            ("Length (m)", length), ("Height (m)", height),
+                            ("Inlet width (m)", &mut *inlet),
+                        ] {
+                            changed |= parameter(ui, language.text(label), value, 0.02..=1000.0, 0.01);
+                        }
+                        if *outlet > *inlet {
+                            *outlet = *inlet;
+                            changed = true;
+                        }
+                        changed |= parameter(ui, language.text("Outlet width (m)"), outlet, 0.02..=*inlet, 0.01);
+                    }
+                    PartKind::Remover { size } | PartKind::Barrier { size } => {
+                        changed |= dimensions(ui, size, 0.02..=1000.0)
+                    }
+                }
+            });
+            if changed {
+                self.edit();
+            }
+            if ui
+                .add_enabled(
+                    !snapshot.running,
+                    egui::Button::new(language.text("Remove object")).shortcut_text("Delete"),
+                )
+                .clicked()
+            {
+                self.remove_part(&id);
+                return;
+            }
+            ui.separator();
+            let prefix = format!("{id}.");
+            for (tag_id, tag) in self.project.tags().range(prefix.clone()..) {
+                if !tag_id.starts_with(&prefix) {
+                    break;
+                }
+                self.tag_row(ui, tag, snapshot);
+            }
+        });
+    }
+
+    fn tag_row(&mut self, ui: &mut Ui, tag: &Tag, snapshot: &Snapshot) {
+        let language = self.settings.language;
+        let state = snapshot.tags.get(&tag.id);
+        let live = state.map_or(tag.default, |state| state.value);
+        let mut value = live;
+        let mut enabled = tag.direction == Direction::Actuator;
+        if self.dirty {
+            enabled = false;
+        }
+        ui.push_id(&tag.id, |ui| {
+            ui.horizontal(|ui| {
+                let label = if let Some(name) = self.project.tag_names.get(&tag.id) {
+                    name
+                } else {
+                    language.text(
+                        tag.name
+                            .rsplit_once(" · ")
+                            .map_or(tag.name.as_str(), |(_, role)| role),
+                    )
+                };
+                ui.label(label).on_hover_text(&tag.id);
+                if state.is_some_and(|state| state.quality == Quality::Stale) {
+                    ui.label(RichText::new(language.text("Stale")).color(WARN));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(enabled, |ui| match &mut value {
+                        Value::Bool(value) => {
+                            ui.checkbox(value, "");
+                        }
+                        Value::Float(value) => {
+                            let mut drag = egui::DragValue::new(value).speed(0.02).max_decimals(3);
+                            if let Some([lo, hi]) = tag.range {
+                                drag = drag.range(lo..=hi);
+                            }
+                            ui.add(drag);
+                        }
+                        Value::Int(value) => {
+                            ui.add(egui::DragValue::new(value));
+                        }
+                    });
+                });
+            });
+            if value != live {
+                let result = self
+                    .session
+                    .runtime
+                    .handle
+                    .execute(Action::Write(vec![(tag.id.clone(), value)]));
+                self.set_error(result);
+            }
+            if !snapshot.running {
+                ui.collapsing(
+                    RichText::new(&tag.id).size(10.5).monospace().color(MUTE),
+                    |ui| {
+                        let mut name = self
+                            .project
+                            .tag_names
+                            .get(&tag.id)
+                            .cloned()
+                            .unwrap_or_else(|| tag.name.clone());
+                        if ui.text_edit_singleline(&mut name).changed() {
+                            if name.trim().is_empty() {
+                                self.project.tag_names.remove(&tag.id);
+                            } else {
+                                self.project.tag_names.insert(tag.id.clone(), name);
+                            }
+                            self.edit();
+                        }
+                    },
+                );
+            }
+        });
+    }
+
+    fn bottom(&mut self, ui: &mut Ui, snapshot: &Snapshot) {
+        let language = self.settings.language;
+        ui.horizontal(|ui| {
+            let (label, color) = if snapshot.running {
+                (language.text("Running"), ACCENT)
+            } else {
+                (language.text("Paused"), WARN)
+            };
+            let (indicator, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter().circle_filled(indicator.center(), 3.0, color);
+            ui.label(RichText::new(label).color(color));
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "{:.2} {}     {HZ} {}     {}: {}",
+                    snapshot.elapsed_seconds,
+                    language.text("s"),
+                    language.text("Hz"),
+                    language.text("Parcels"),
+                    snapshot.parcels.len()
+                ))
+                .color(MUTE),
+            );
+            if self
+                .project
+                .parts
+                .iter()
+                .any(|part| matches!(part.kind, PartKind::Staff { .. } | PartKind::Machine { .. }))
+                && let Some(time) = snapshot.calendar_time
+            {
+                ui.label(format!(
+                    "{} {}",
+                    language.weekday(time.weekday()),
+                    time.format("%Y-%m-%d %H:%M:%S")
+                ));
+            }
+            if let Some((fps, hz)) = self.rates.measured {
+                ui.label(
+                    RichText::new(format!(
+                        "{fps:.0} FPS · {hz:.0} {}",
+                        language.text("sim Hz")
+                    ))
+                    .color(MUTE),
+                );
+            }
+            if self.dirty && ui.button(language.text("Apply changes")).clicked() {
+                let res = self.apply_edits();
+                self.set_error(res);
+            }
+            if let Some((message, is_error)) = &self.notice {
+                let text = if *is_error {
+                    language.error(message)
+                } else {
+                    language.text(message).to_owned()
+                };
+                ui.label(RichText::new(text).color(if *is_error { WARN } else { ACCENT }));
+                if ui.small_button("×").clicked() {
+                    self.notice = None;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(self.backend.label()).color(MUTE))
+                    .on_hover_text(&self.gpu);
+            });
+        });
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
+        let language = self.settings.language;
+        let Some(mut dialog) = self.dialog.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut done = false;
+        match &mut dialog {
+            Dialog::New => {
+                egui::Window::new(language.text("New project"))
+                    .open(&mut open)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        if self.unsaved {
+                            ui.colored_label(
+                                WARN,
+                                language.text("There are unsaved changes in the current project."),
+                            );
+                        }
+                        if ui.button(language.text("Create empty project")).clicked() {
+                            let project = Project {
+                                version: crate::project::SCHEMA_VERSION,
+                                name: language.text("Untitled line").into(),
+                                production: Default::default(),
+                                parts: Vec::new(),
+                                products: Default::default(),
+                                tag_names: Default::default(),
+                                initial_commands: Default::default(),
+                                drivers: Vec::new(),
+                            };
+                            match Session::new(project.clone(), true) {
+                                Ok(session) => {
+                                    self.project = project;
+                                    self.session = session;
+                                    self.path = None;
+                                    self.selection = None;
+                                    self.dirty = false;
+                                    self.unsaved = true;
+                                    self.camera = viewport::Camera::default();
+                                    done = true;
+                                }
+                                Err(error) => self.set_error(Err(error)),
+                            }
+                        }
+                    });
+            }
+            Dialog::File {
+                action,
+                path,
+                error,
+            } => {
+                let (title, submit) = match action {
+                    FileAction::Open => ("Open project", "Open"),
+                    FileAction::Save { then_open: None } => ("Save project", "Save"),
+                    FileAction::Save { .. } => ("Save current project", "Save and open"),
+                };
+                let response =
+                    egui::Modal::new(egui::Id::unique(("project file", title))).show(ctx, |ui| {
+                        ui.set_width(430.0);
+                        ui.heading(language.text(title));
+                        ui.label(language.text("Project file path"));
+                        let edit =
+                            ui.add(egui::TextEdit::singleline(path).desired_width(f32::INFINITY));
+                        if let Some(error) = error {
+                            ui.colored_label(WARN, language.error(error));
+                        }
+                        ui.horizontal(|ui| {
+                            let submit = ui
+                                .add_enabled(
+                                    !path.trim().is_empty(),
+                                    egui::Button::new(language.text(submit)),
+                                )
+                                .clicked();
+                            let cancel = ui.button(language.text("Cancel")).clicked();
+                            let enter =
+                                edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            (submit || (enter && !path.trim().is_empty()), cancel)
+                        })
+                        .inner
+                    });
+                let (submitted, cancelled) = response.inner;
+                if cancelled || response.should_close() {
+                    done = true;
+                } else if submitted {
+                    let path = PathBuf::from(path.trim());
+                    match action {
+                        FileAction::Open if self.unsaved => {
+                            self.dialog = Some(Dialog::ConfirmOpen(path));
+                            done = true;
+                        }
+                        FileAction::Open => match self.open_project(&path) {
+                            Ok(()) => done = true,
+                            Err(failure) => *error = Some(failure.to_string()),
+                        },
+                        FileAction::Save { then_open } => match self.save_project(&path) {
+                            Ok(()) => {
+                                done = true;
+                                if let Some(destination) = then_open.take() {
+                                    self.resume_open(destination);
+                                }
+                            }
+                            Err(failure) => *error = Some(failure.to_string()),
+                        },
+                    }
+                }
+            }
+            Dialog::ConfirmOpen(path) => {
+                let response =
+                    egui::Modal::new(egui::Id::unique("confirm open project")).show(ctx, |ui| {
+                        ui.set_width(430.0);
+                        ui.heading(language.text("Unsaved project"));
+                        ui.label(language.text("Save changes before opening the other project?"));
+                        ui.label(RichText::new(path.display().to_string()).color(MUTE));
+                        ui.horizontal(|ui| {
+                            if ui.button(language.text("Save…")).clicked() {
+                                self.dialog = Some(self.save_dialog(Some(path.clone())));
+                                done = true;
+                            }
+                            if ui.button(language.text("Open without saving")).clicked() {
+                                self.resume_open(path.clone());
+                                done = true;
+                            }
+                            if ui.button(language.text("Cancel")).clicked() {
+                                done = true;
+                            }
+                        });
+                    });
+                done |= response.should_close();
+            }
+            Dialog::Import(import) => {
+                let product = egui::Window::new(language.text("Import 3D product"))
+                    .open(&mut open)
+                    .resizable(false)
+                    .default_width(440.0)
+                    .show(ctx, |ui| import.show(ui, !snapshot.running, language))
+                    .and_then(|response| response.inner)
+                    .flatten();
+                if let Some(product) = product {
+                    let id = (1..)
+                        .map(|number| format!("product-{number}"))
+                        .find(|id| !self.project.products.contains_key(id))
+                        .unwrap();
+                    self.project.products.insert(id.clone(), product);
+                    self.add_product(&id);
+                    done = true;
+                }
+            }
+            Dialog::Production { json, error } => {
+                egui::Window::new(language.text("Production"))
+                    .open(&mut open)
+                    .default_width(600.0)
+                    .show(ctx, |ui| {
+                        ui.label(language.text("Initial simulated date, seed and work calendars"));
+                        if ui.button(language.text("Add weekday calendar")).clicked() {
+                            match serde_json::from_str::<Production>(json) {
+                                Ok(mut settings) => {
+                                    let index = (1..).find(|i| !settings.calendars.contains_key(&format!("shift-{i}"))).unwrap();
+                                    let calendar = serde_json::from_str(r#"{"weekly":[{"days":[1,2,3,4,5],"start_minute":480,"end_minute":960}]}"#).unwrap();
+                                    settings.calendars.insert(format!("shift-{index}"), calendar);
+                                    *json = serde_json::to_string_pretty(&settings).unwrap();
+                                    *error = None;
+                                }
+                                Err(err) => *error = Some(err.to_string()),
+                            }
+                        }
+                        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                            ui.add(egui::TextEdit::multiline(json).code_editor().desired_rows(14).desired_width(f32::INFINITY));
+                        });
+                        if let Some(error) = error.as_ref() {
+                            ui.colored_label(WARN, language.error(error));
+                        }
+                        if ui.add_enabled(!snapshot.running, egui::Button::new(language.text("Apply production settings"))).clicked() {
+                            let result = (|| {
+                                let settings: Production = serde_json::from_str(json)?;
+                                let mut project = self.project.clone();
+                                project.production = settings;
+                                project.validate()?;
+                                self.project = project;
+                                self.edit();
+                                Ok::<_, anyhow::Error>(())
+                            })();
+                            *error = result.err().map(|err| format!("{err:#}"));
+                            done = error.is_none();
+                        }
+                    });
+            }
+            Dialog::Settings => {
+                egui::Window::new(language.text("Language and graphics"))
+                    .open(&mut open)
+                    .id(egui::Id::unique("studio-preferences"))
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(language.text("Language"));
+                            ui.radio_value(
+                                &mut self.settings.language,
+                                Language::Russian,
+                                "Русский",
+                            );
+                            ui.radio_value(
+                                &mut self.settings.language,
+                                Language::English,
+                                "English",
+                            );
+                        });
+                        ui.separator();
+                        let previous_quality = self.settings.graphics_quality;
+                        ui.label(language.text("Graphics quality"));
+                        let labels = ["Performance", "Balanced", "High quality"];
+                        let values = [
+                            render::GraphicsQuality::Performance,
+                            render::GraphicsQuality::Balanced,
+                            render::GraphicsQuality::High,
+                        ];
+                        ui.horizontal(|ui| {
+                            for (quality, label) in values.into_iter().zip(labels) {
+                                ui.radio_value(
+                                    &mut self.settings.graphics_quality,
+                                    quality,
+                                    language.text(label),
+                                );
+                            }
+                        });
+                        ui.separator();
+                        ui.label(format!(
+                            "{} · {} · {}",
+                            language.text("Active"),
+                            self.backend.label(),
+                            self.gpu
+                        ));
+                        let previous = self.settings.backend;
+                        ui.radio_value(&mut self.settings.backend, Backend::Vulkan, "Vulkan");
+                        #[cfg(not(target_os = "macos"))]
+                        ui.radio_value(&mut self.settings.backend, Backend::OpenGl, "OpenGL");
+                        let backend_changed = previous != self.settings.backend;
+                        if backend_changed
+                            || self.settings.language != language
+                            || self.settings.graphics_quality != previous_quality
+                        {
+                            let result = self.save_settings();
+                            if backend_changed && result.is_ok() {
+                                self.notice = Some((
+                                    "Backend saved. Restart Factory Sim to apply.".into(),
+                                    false,
+                                ));
+                            }
+                            self.set_error(result);
+                            ctx.request_repaint();
+                        }
+                        if self.settings.backend != self.backend {
+                            ui.label(language.text("Applied on next launch."));
+                        }
+                        if ui.button(language.text("Reset view")).clicked() {
+                            self.camera = viewport::Camera::default();
+                        }
+                    });
+            }
+            Dialog::Drivers { json, error } => {
+                egui::Window::new(language.text("PLC connections"))
+                    .open(&mut open)
+                    .default_width(630.0)
+                    .show(ctx, |ui| {
+                        for (id, state) in &snapshot.drivers {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(id).monospace());
+                                ui.label(RichText::new(language.text(state)).color(MUTE));
+                            });
+                        }
+                        ui.separator();
+                        ui.label(language.text("Driver profiles and symbol mappings"));
+                        egui::ScrollArea::vertical()
+                            .max_height(395.0)
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(json)
+                                        .code_editor()
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(16),
+                                );
+                            });
+                        if let Some(error) = error.as_ref() {
+                            ui.colored_label(WARN, language.error(error));
+                        }
+                        if ui
+                            .add_enabled(
+                                !snapshot.running,
+                                egui::Button::new(language.text("Apply profiles")),
+                            )
+                            .clicked()
+                        {
+                            let res = (|| {
+                                let drivers: Vec<Driver> = serde_json::from_str(json)?;
+                                let mut project = self.project.clone();
+                                project.drivers = drivers;
+                                let session = Session::new(project.clone(), true)?;
+                                self.project = project;
+                                self.session = session;
+                                self.dirty = false;
+                                self.unsaved = true;
+                                Ok::<(), anyhow::Error>(())
+                            })();
+                            *error = res.err().map(|e| e.to_string());
+                            done = error.is_none();
+                        }
+                    });
+            }
+        }
+        if open && !done {
+            self.dialog = Some(dialog);
+        }
+    }
+
+    fn save_settings(&self) -> Result<()> {
+        let path = self
+            .path_for_settings
+            .as_ref()
+            .context("no settings directory")?;
+        fs::create_dir_all(path.parent().context("invalid settings path")?)?;
+        fs::write(path, serde_json::to_vec_pretty(&self.settings)?)?;
+        Ok(())
+    }
+}
+
+impl eframe::App for Studio {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.shown {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.request_repaint();
+            self.shown = true;
+        }
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
+        let snapshot = self.session.runtime.handle.snapshot();
+        self.rates.sample(&snapshot, frame_start);
+        egui::Panel::top("toolbar")
+            .exact_size(54.0)
+            .show(ui, |ui| self.top(ui, &snapshot));
+        egui::Panel::bottom("status")
+            .exact_size(31.0)
+            .show(ui, |ui| self.bottom(ui, &snapshot));
+        egui::Panel::left("scene")
+            .default_size(205.0)
+            .min_size(168.0)
+            .show(ui, |ui| self.left(ui, snapshot.running));
+        egui::Panel::right("inspector")
+            .default_size(268.0)
+            .min_size(224.0)
+            .show(ui, |ui| self.right(ui, &snapshot));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| {
+                let interaction = viewport::draw(
+                    ui,
+                    self.settings.language,
+                    &mut self.camera,
+                    self.settings.graphics_quality,
+                    &self.project,
+                    &snapshot,
+                    self.selection.as_deref(),
+                    self.dirty,
+                    !snapshot.running && self.dialog.is_none(),
+                    &mut self.object_drag,
+                );
+                if let Some(selection) = interaction.selection {
+                    self.selection = selection;
+                    if self.selection.is_some() {
+                        self.show_tags = false;
+                    }
+                }
+                if let Some((id, movement)) = interaction.movement
+                    && let Some(part) = self.project.parts.iter_mut().find(|part| part.id == id)
+                    && (part.position != movement.position.to_array() || part.yaw != movement.yaw)
+                {
+                    part.position = movement.position.to_array();
+                    part.yaw = movement.yaw;
+                    self.edit();
+                }
+            });
+        self.dialogs(ui.ctx(), &snapshot);
+        let ctx = ui.ctx();
+        if !snapshot.running
+            && self.dialog.is_none()
+            && !ctx.text_edit_focused()
+            && !egui::Popup::is_any_open(ctx)
+            && let Some(id) = self.selection.clone()
+            && ctx.input_mut(|input| {
+                input.modifiers.is_none()
+                    && input.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+            })
+        {
+            self.remove_part(&id);
+            ctx.request_repaint();
+        }
+        if snapshot.running {
+            if let Some(fps) = self.fps_limit {
+                let frame = Duration::from_secs_f64(1.0 / f64::from(fps));
+                ui.ctx()
+                    .request_repaint_after(frame.saturating_sub(frame_start.elapsed()));
+            } else {
+                ui.ctx().request_repaint();
+            }
+        } else {
+            ui.ctx().request_repaint_after(Duration::from_millis(150));
+        }
+    }
+}
+
+fn dimensions(ui: &mut Ui, values: &mut [f32; 3], range: std::ops::RangeInclusive<f32>) -> bool {
+    ui.horizontal(|ui| {
+        let mut changed = false;
+        for (name, value) in ["X", "Y", "Z"].into_iter().zip(values) {
+            changed |= ui
+                .add(
+                    egui::DragValue::new(value)
+                        .prefix(format!("{name} "))
+                        .range(range.clone())
+                        .speed(0.02),
+                )
+                .changed();
+        }
+        changed
+    })
+    .inner
+}
+
+fn parameter(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    speed: f32,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(egui::DragValue::new(value).range(range).speed(speed))
+            .changed()
+    })
+    .inner
+}
+
+fn palette() -> [PartKind; 7] {
+    [
+        PartKind::Conveyor {
+            size: [2.0, 0.22, 1.0],
+            speed: 1.0,
+        },
+        PartKind::Pusher {
+            stroke: 0.9,
+            speed: 1.0,
+        },
+        PartKind::Sensor { range: 1.2 },
+        PartKind::Emitter {
+            interval: 2.0,
+            emission: None,
+            random_spawn_belt: None,
+            size: [0.42, 0.38, 0.46],
+            mass: 2.0,
+        },
+        PartKind::Remover {
+            size: [0.3, 1.0, 1.2],
+        },
+        PartKind::Barrier {
+            size: [2.0, 0.25, 0.07],
+        },
+        PartKind::Crate {
+            size: [0.42, 0.38, 0.46],
+            mass: 2.0,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod localization_tests {
+    use super::*;
+
+    #[test]
+    fn settings_without_language_open_in_russian() {
+        let settings: Settings = serde_json::from_str(r#"{"backend":"vulkan"}"#).unwrap();
+        assert_eq!(settings.language, Language::Russian);
+        assert_eq!(settings.backend, Backend::Vulkan);
+        assert_eq!(settings.graphics_quality, render::GraphicsQuality::Balanced);
+        let english = Settings {
+            language: Language::English,
+            ..settings
+        };
+        let serialized = serde_json::to_string(&english).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serialized)
+                .unwrap()
+                .language,
+            Language::English
+        );
+    }
+
+    #[test]
+    fn equipment_and_generated_tags_have_russian_labels() {
+        let kinds = palette()
+            .into_iter()
+            .chain(production_ui::equipment_palette())
+            .chain(production_ui::station_palette());
+        let mut project = Project::demo();
+        project.parts.clear();
+        project.tag_names.clear();
+        for (index, kind) in kinds.enumerate() {
+            let label = kind.label();
+            assert_ne!(Language::Russian.text(label), label);
+            project.parts.push(Part {
+                id: format!("equipment-{index}"),
+                name: label.into(),
+                position: [0.0; 3],
+                yaw: 0.0,
+                product: None,
+                kind,
+            });
+        }
+        for tag in project.tags().into_values() {
+            let label = tag
+                .name
+                .rsplit_once(" · ")
+                .map_or(tag.name.as_str(), |(_, role)| role);
+            assert_ne!(
+                Language::Russian.text(label),
+                label,
+                "missing translation for {}",
+                tag.id
+            );
+        }
+        for (_, spec) in BOXES {
+            assert_ne!(Language::Russian.text(spec.name), spec.name);
+        }
+    }
+}

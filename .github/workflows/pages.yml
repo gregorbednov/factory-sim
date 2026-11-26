@@ -1,0 +1,60 @@
+name: Factory Sim Pages
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install WebAssembly target
+        run: rustup update stable && rustup target add --toolchain stable wasm32-unknown-unknown
+      - name: Select wasm-bindgen version
+        id: bindgen
+        run: |
+          version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-linux-${{ steps.bindgen.outputs.version }}
+      - name: Install wasm-bindgen
+        env:
+          BINDGEN_VERSION: ${{ steps.bindgen.outputs.version }}
+        run: |
+          if ! wasm-bindgen --version 2>/dev/null | grep -Fx "wasm-bindgen $BINDGEN_VERSION"; then
+            cargo +stable install wasm-bindgen-cli --locked --version "$BINDGEN_VERSION" --force
+          fi
+      - name: Build site
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: scripts/build-web.sh target/pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/pages
+
+  deploy:
+    if: github.ref_name == github.event.repository.default_branch
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

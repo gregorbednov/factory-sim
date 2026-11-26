@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "name": "Production cell",
+  "production": {
+    "seed": 274,
+    "start": "2026-01-05T07:59:58",
+    "calendars": {
+      "day-shift": {
+        "weekly": [{"days": [1, 2, 3, 4, 5], "start_minute": 480, "end_minute": 960}],
+        "overrides": {"2026-01-07": []}
+      }
+    }
+  },
+  "parts": [
+    {"id":"source","name":"Blank supply","kind":"emitter","position":[-4.0,0.88,0.0],"interval":4.0,"random_spawn_belt":"infeed","size":[0.25,0.12,0.34],"mass":1.25,"emission":{"mode":"counts","rows":[{"product":"raw-blank","count":3},{"product":null,"count":1}],"skip":"hour < 8"}},
+    {"id":"infeed","name":"Infeed rollers","kind":"equipment","equipment":"roller","position":[-2.62,0.59,0.0],"size":[3.85,0.22,0.84]},
+    {"id":"infeed_guide","name":"Infeed flow guide","kind":"flow_guide","position":[-2.24,0.80,0.0],"length":2.76,"height":0.18,"inlet":0.84,"outlet":0.44},
+    {"id":"blade","name":"Intake stop","kind":"equipment","equipment":"stop_blade","position":[-0.39,0.75,0.0],"size":[0.075,0.12,0.55]},
+    {"id":"cnc","name":"Machining center","kind":"machine","position":[0.25,0.7,0.0],"machine":{"area":"cell-a","seconds":2.0,"scrap_percent":25,"failure_percent":35,"repair_seconds":2.0,"door":"gate","unload_robot":"gantry","outlet":[1.43,0.0,0.0],"reject":[0.75,0.0,0.43]}},
+    {"id":"gantry","name":"Sorting pick and place","kind":"robot","position":[0.1,0.65,-0.03],"robot":{}},
+    {"id":"good_belt","name":"Good receiving belt","kind":"conveyor","position":[1.67,0.59,0.0],"size":[0.64,0.22,0.54],"speed":0.6},
+    {"id":"scale","name":"Checkweigher","kind":"equipment","equipment":"scale","position":[2.575,0.58,0.0],"size":[1.15,0.22,0.84]},
+    {"id":"outfeed","name":"Good outfeed","kind":"conveyor","position":[3.88,0.57,0.0],"size":[1.44,0.22,0.84],"speed":0.6},
+    {"id":"beam","name":"Outfeed light array","kind":"equipment","equipment":"light_array","position":[3.6,0.80,0.0],"yaw":-90.0,"size":[1.02,0.27,0.08]},
+    {"id":"good_exit","name":"Good exit","kind":"remover","position":[4.43,0.88,0.0],"size":[0.30,0.52,0.88]},
+    {"id":"reject_belt","name":"Reject outfeed","kind":"conveyor","position":[1.0,0.59,1.79],"yaw":-90.0,"size":[3.06,0.22,0.40],"speed":0.55},
+    {"id":"reject_exit","name":"Reject exit","kind":"remover","position":[1.0,0.87,3.05],"yaw":-90.0,"size":[0.30,0.52,0.44]},
+    {"id":"fence","name":"Guarding","kind":"equipment","equipment":"fence","position":[1.27,0.90,-1.17],"size":[1.65,1.8,0.08]},
+    {"id":"gate","name":"Cell access","kind":"equipment","equipment":"safety_door","position":[-0.17,0.90,-1.17],"size":[1.2,1.8,0.08]},
+    {"id":"operator","name":"Day operator","kind":"staff","position":[0.25,0.0,-1.65],"staff":{"role":"operator","area":"cell-a","calendar":"day-shift"}},
+    {"id":"technician","name":"Day technician","kind":"staff","position":[0.9,0.0,-2.0],"staff":{"role":"technician","area":"cell-a","calendar":"day-shift"}}
+  ],
+  "initial_commands": {
+    "source.enabled":true,
+    "infeed.forward":true,
+    "blade.raise":true,
+    "cnc.start":true,
+    "gantry.start":true,
+    "scale.forward":true
+  }
+}
