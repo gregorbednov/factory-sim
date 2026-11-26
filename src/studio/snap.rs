@@ -1,6 +1,9 @@
 use glam::{Quat, Vec3};
 
-use crate::project::{Part, PartKind, Project, Value};
+use crate::{
+    production::Equipment,
+    project::{Part, PartKind, Project, Value},
+};
 
 const SNAP_RADIUS: f32 = 0.28;
 const HEIGHT_TOLERANCE: f32 = 0.08;
@@ -62,14 +65,52 @@ impl Deck {
     }
 }
 
-fn ports(part: &Part, deck: Option<&Deck>) -> Vec<Port> {
+fn reversible_ports(part: &Part) -> Option<Vec<Port>> {
+    let PartKind::Equipment {
+        equipment, size, ..
+    } = part.kind
+    else {
+        return None;
+    };
+
+    let side_length = match equipment {
+        // After indexing, the same roller deck reaches the perpendicular conveyors.
+        Equipment::Turntable => size[0],
+        Equipment::ChainTransfer => size[2],
+        _ => return None,
+    };
+    let height = Vec3::Y * (size[1] * 0.5);
+    Some(
+        [
+            (Vec3::X, size[0]),
+            (Vec3::NEG_X, size[0]),
+            (Vec3::Z, side_length),
+            (Vec3::NEG_Z, side_length),
+        ]
+        .into_iter()
+        .flat_map(|(outward, span)| {
+            let distance = span * 0.5 + HALF_GAP;
+            [true, false].map(|input| Port {
+                local: height + outward * distance,
+                flow: if input { -outward } else { outward },
+                input,
+            })
+        })
+        .collect(),
+    )
+}
+
+fn ports(part: &Part, deck: Option<&Deck>) -> (Vec<Port>, bool) {
     if let Some(deck) = deck {
-        return deck.ports();
+        return (deck.ports(), true);
+    }
+    if let Some(ports) = reversible_ports(part) {
+        return (ports, true);
     }
     let PartKind::Machine { machine } = &part.kind else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    [
+    let machine_ports = [
         (machine.intake, true),
         (machine.outlet, false),
         (machine.reject, false),
@@ -86,7 +127,8 @@ fn ports(part: &Part, deck: Option<&Deck>) -> Vec<Port> {
             input,
         })
     })
-    .collect()
+    .collect();
+    (machine_ports, false)
 }
 
 fn rotation(yaw: f32) -> Quat {
@@ -168,7 +210,7 @@ fn mount(
 
 pub(super) fn find(project: &Project, moving: &Part, raw: &Placement) -> Option<Snap> {
     let moving_deck = Deck::new(project, moving);
-    let moving_ports = ports(moving, moving_deck.as_ref());
+    let (moving_ports, moving_transport) = ports(moving, moving_deck.as_ref());
     let mut links = None;
     let mut mounts = None;
     for other in &project.parts {
@@ -182,8 +224,9 @@ pub(super) fn find(project: &Project, moving: &Part, raw: &Placement) -> Option<
         };
         let fixed_rotation = rotation(fixed.yaw);
 
-        if moving_deck.is_some() || other_deck.is_some() {
-            for port in ports(other, other_deck.as_ref()) {
+        let (other_ports, other_transport) = ports(other, other_deck.as_ref());
+        if moving_transport || other_transport {
+            for port in other_ports {
                 let marker = fixed.position + fixed_rotation * port.local;
                 for own in moving_ports.iter().filter(|own| own.input != port.input) {
                     if (raw.position.y + own.local.y - marker.y).abs() > HEIGHT_TOLERANCE {
@@ -279,6 +322,116 @@ mod tests {
             .initial_commands
             .insert("moving.target_speed".into(), Value::Float(-0.5));
         assert!(find(&project, &moving, &raw).is_some());
+    }
+
+    #[test]
+    fn turntable_snaps_at_both_indexed_positions_when_either_part_moves() {
+        let mut project = project();
+        let table = Part {
+            kind: PartKind::Equipment {
+                equipment: Equipment::Turntable,
+                size: [1.1, 0.22, 0.9],
+                scale_capacity: 20,
+            },
+            ..belt("table", [0.0, 0.59, 0.0], 90.0)
+        };
+
+        for (offset, yaw) in [(Vec3::Z, 90.0), (Vec3::X, 0.0)] {
+            let expected = Vec3::new(0.0, 0.59, 0.0) + 1.56 * offset;
+            let conveyor = belt("belt", expected.into(), yaw);
+            project.parts = vec![table.clone()];
+            let raw = Placement {
+                position: expected + Vec3::new(0.08, -0.02, 0.08),
+                yaw: yaw + 4.0,
+            };
+            let snapped = find(&project, &conveyor, &raw).unwrap();
+            assert!(
+                snapped
+                    .placement
+                    .position
+                    .distance(expected - 0.02 * Vec3::Y)
+                    < 0.001
+            );
+            assert!((snapped.placement.yaw - yaw).abs() < 0.001);
+            assert!(
+                find(
+                    &project,
+                    &conveyor,
+                    &Placement {
+                        position: raw.position,
+                        yaw: yaw + 45.0,
+                    }
+                )
+                .is_none()
+            );
+
+            project.parts = vec![conveyor];
+            let raw = Placement {
+                position: Vec3::new(0.08, 0.61, 0.08),
+                yaw: 86.0,
+            };
+            let snapped = find(&project, &table, &raw).unwrap();
+            assert!(snapped.placement.position.distance(Vec3::Y * 0.61) < 0.001);
+            assert!((snapped.placement.yaw - 90.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn chain_transfer_snaps_to_conveyors_along_rollers_and_chains() {
+        let mut project = project();
+        let transfer = Part {
+            kind: PartKind::Equipment {
+                equipment: Equipment::ChainTransfer,
+                size: [1.4, 0.22, 0.8],
+                scale_capacity: 20,
+            },
+            ..belt("transfer", [0.0, 0.59, 0.0], 90.0)
+        };
+
+        // Rotating the transfer puts its roller axis along Z and its chain axis along X.
+        for (outward, distance, yaw) in [
+            (Vec3::NEG_Z, 1.71, 90.0),
+            (Vec3::Z, 1.71, 90.0),
+            (Vec3::X, 1.41, 0.0),
+            (Vec3::NEG_X, 1.41, 0.0),
+        ] {
+            let expected = Vec3::Y * 0.59 + outward * distance;
+            let conveyor = belt("belt", expected.into(), yaw);
+            project.parts = vec![transfer.clone()];
+            let raw = Placement {
+                position: expected + Vec3::new(0.07, -0.01, -0.09),
+                yaw: yaw - 5.0,
+            };
+            let snapped = find(&project, &conveyor, &raw).unwrap();
+            assert!(
+                snapped
+                    .placement
+                    .position
+                    .distance(expected - 0.01 * Vec3::Y)
+                    < 0.001
+            );
+            assert!((snapped.placement.yaw - yaw).abs() < 0.001);
+            assert!(
+                find(
+                    &project,
+                    &conveyor,
+                    &Placement {
+                        position: raw.position + Vec3::Y * 0.15,
+                        yaw: raw.yaw,
+                    },
+                )
+                .is_none()
+            );
+
+            project.parts = vec![conveyor];
+            let raw = Placement {
+                position: Vec3::new(-0.06, 0.61, 0.08),
+                yaw: 96.0,
+            };
+            let snapped = find(&project, &transfer, &raw).unwrap();
+            assert!(snapped.placement.position.distance(Vec3::Y * 0.61) < 0.001);
+            assert!((snapped.placement.yaw - 90.0).abs() < 0.001);
+        }
     }
 
     #[test]

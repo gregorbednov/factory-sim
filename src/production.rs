@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Equipment {
     Roller,
+    FreeRoller,
+    Chute,
     StopBlade,
     Scale,
     Capacitive,
@@ -23,9 +25,11 @@ pub enum Equipment {
 }
 
 impl Equipment {
-    #[cfg(feature = "studio")]
-    pub const ALL: [Self; 10] = [
+    #[cfg(any(feature = "studio", feature = "web"))]
+    pub const ALL: [Self; 12] = [
         Self::Roller,
+        Self::FreeRoller,
+        Self::Chute,
         Self::StopBlade,
         Self::Scale,
         Self::Capacitive,
@@ -37,10 +41,12 @@ impl Equipment {
         Self::ChainTransfer,
     ];
 
-    #[cfg(feature = "studio")]
+    #[cfg(any(feature = "studio", feature = "web"))]
     pub fn label(self) -> &'static str {
         match self {
             Self::Roller => "Roller conveyor",
+            Self::FreeRoller => "Free roller",
+            Self::Chute => "Gravity chute",
             Self::StopBlade => "Stop blade",
             Self::Scale => "Conveyor scale",
             Self::Capacitive => "Capacitive sensor",
@@ -53,10 +59,12 @@ impl Equipment {
         }
     }
 
-    #[cfg(feature = "studio")]
+    #[cfg(any(feature = "studio", feature = "web"))]
     pub fn size(self) -> [f32; 3] {
         match self {
             Self::Roller => [2.0, 0.22, 1.1],
+            Self::FreeRoller => [0.14, 0.12, 0.85],
+            Self::Chute => [2.0, 0.08, 0.80],
             Self::Scale | Self::ChainTransfer | Self::Turntable => [1.1, 0.22, 1.1],
             Self::StopBlade => [0.08, 0.12, 0.8],
             Self::Capacitive => [0.10, 0.12, 0.10],
@@ -65,6 +73,18 @@ impl Equipment {
             Self::Fence | Self::SafetyDoor => [1.2, 1.8, 0.08],
         }
     }
+}
+
+pub const CHUTE_SLOPE: f32 = 8.0_f32.to_radians();
+
+pub fn chute_rails([length, height, width]: [f32; 3]) -> [([f32; 3], [f32; 3]); 2] {
+    let thickness = (width * 0.08).min(0.045);
+    [-1.0, 1.0].map(|side| {
+        (
+            [0.0, height * 0.5 + 0.065, side * (width - thickness) * 0.5],
+            [length, 0.13, thickness],
+        )
+    })
 }
 
 pub struct GuideRail {
@@ -222,6 +242,8 @@ pub struct Staff {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Machine {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly: Option<Assembly>,
     pub area: String,
     pub input: String,
     pub output: String,
@@ -241,6 +263,7 @@ pub struct Machine {
 impl Default for Machine {
     fn default() -> Self {
         Self {
+            assembly: None,
             area: "shop".into(),
             input: "raw-blank".into(),
             output: "machined-base".into(),
@@ -255,6 +278,55 @@ impl Default for Machine {
             door: None,
             unload_robot: None,
         }
+    }
+}
+
+pub const MAX_ASSEMBLY_COMPONENTS: u32 = 32;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssemblyMode {
+    Manual,
+    Automatic,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Assembly {
+    pub mode: AssemblyMode,
+    pub bom: Vec<BomLine>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BomLine {
+    pub product: String,
+    pub count: u32,
+}
+
+impl Machine {
+    #[cfg(any(feature = "studio", feature = "web"))]
+    pub fn assembly_table(mode: AssemblyMode) -> Self {
+        Self {
+            assembly: Some(Assembly {
+                mode,
+                bom: ["machined-base", "machined-lid"]
+                    .into_iter()
+                    .map(|product| BomLine {
+                        product: product.into(),
+                        count: 1,
+                    })
+                    .collect(),
+            }),
+            output: "assembled-product".into(),
+            ..Self::default()
+        }
+    }
+
+    pub fn requires_operator(&self) -> bool {
+        self.assembly
+            .as_ref()
+            .is_none_or(|assembly| assembly.mode == AssemblyMode::Manual)
     }
 }
 

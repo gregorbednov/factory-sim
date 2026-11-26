@@ -5,65 +5,10 @@ use std::collections::BTreeMap;
 use crate::{
     product::{BOXES, Product},
     production::{
-        CountRow, Emission, Equipment, Machine, Probability, ProbabilityRow, Production, Robot,
-        RobotStep, Staff, StaffRole,
+        AssemblyMode, BomLine, CountRow, Emission, MAX_ASSEMBLY_COMPONENTS, Machine, Probability,
+        ProbabilityRow, Production, Robot, RobotStep, Staff,
     },
-    project::PartKind,
 };
-
-pub fn equipment_palette() -> impl Iterator<Item = PartKind> {
-    Equipment::ALL
-        .into_iter()
-        .map(|equipment| PartKind::Equipment {
-            size: equipment.size(),
-            equipment,
-            scale_capacity: 20,
-        })
-        .chain(std::iter::once(PartKind::FlowGuide {
-            length: 2.0,
-            height: 0.18,
-            inlet: 0.95,
-            outlet: 0.64,
-        }))
-}
-
-pub fn station_palette() -> [PartKind; 5] {
-    let mut two_axis = Robot {
-        two_axis: true,
-        speed: 2.0,
-        ..Robot::default()
-    };
-    for step in &mut two_axis.program {
-        if let RobotStep::Move { at } = step {
-            at[0] *= 0.5;
-            at[1] *= 0.65;
-            at[2] = 0.0;
-        }
-    }
-    [
-        PartKind::Machine {
-            machine: Machine::default(),
-        },
-        PartKind::Robot {
-            robot: Robot::default(),
-        },
-        PartKind::Robot { robot: two_axis },
-        PartKind::Staff {
-            staff: Staff {
-                role: StaffRole::Operator,
-                area: "shop".into(),
-                calendar: None,
-            },
-        },
-        PartKind::Staff {
-            staff: Staff {
-                role: StaffRole::Technician,
-                area: "shop".into(),
-                calendar: None,
-            },
-        },
-    ]
-}
 
 pub fn product_picker(
     ui: &mut Ui,
@@ -72,6 +17,18 @@ pub fn product_picker(
     id: &mut Option<String>,
     products: &BTreeMap<String, Product>,
     none: Option<&str>,
+) -> bool {
+    filtered_product_picker(ui, language, caption, id, products, none, |_| true)
+}
+
+fn filtered_product_picker(
+    ui: &mut Ui,
+    language: Language,
+    caption: &str,
+    id: &mut Option<String>,
+    products: &BTreeMap<String, Product>,
+    none: Option<&str>,
+    include: impl Fn(&str) -> bool,
 ) -> bool {
     let name = id
         .as_ref()
@@ -90,10 +47,10 @@ pub fn product_picker(
             if let Some(label) = none {
                 ui.selectable_value(id, None, language.text(label));
             }
-            for (key, spec) in &BOXES {
+            for (key, spec) in BOXES.iter().filter(|(key, _)| include(key)) {
                 ui.selectable_value(id, Some((*key).into()), language.text(spec.name));
             }
-            for (key, product) in products {
+            for (key, product) in products.iter().filter(|(key, _)| include(key)) {
                 ui.selectable_value(id, Some(key.clone()), &product.name);
             }
         });
@@ -313,15 +270,92 @@ pub fn machine(
 ) -> bool {
     ui.label(language.text("Area"));
     let mut changed = ui.text_edit_singleline(&mut machine.area).changed();
-    for (label, product) in [
-        ("Input", &mut machine.input),
-        ("Good output", &mut machine.output),
-    ] {
-        let mut key = Some(product.clone());
-        if product_picker(ui, language, label, &mut key, products, None) {
-            *product = key.unwrap();
+    if let Some(assembly) = &mut machine.assembly {
+        ui.label(language.text(match assembly.mode {
+            AssemblyMode::Manual => "Requires an on-duty operator in this area",
+            AssemblyMode::Automatic => "Runs without an operator",
+        }));
+        ui.separator();
+        ui.label(language.text("Bill of materials"));
+        let mut remove = None;
+        let mut total: u32 = assembly.bom.iter().map(|row| row.count).sum();
+        for index in 0..assembly.bom.len() {
+            let row = &assembly.bom[index];
+            let mut product = Some(row.product.clone());
+            let mut count = row.count;
+            let maximum = MAX_ASSEMBLY_COMPONENTS - (total - count);
+            ui.push_id(("bom-row", index), |ui| {
+                changed |= filtered_product_picker(
+                    ui,
+                    language,
+                    "Component",
+                    &mut product,
+                    products,
+                    None,
+                    |id| {
+                        assembly
+                            .bom
+                            .iter()
+                            .enumerate()
+                            .all(|(i, row)| i == index || row.product != id)
+                    },
+                );
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut count)
+                                .range(1..=maximum)
+                                .prefix(format!("{} ", language.text("Quantity"))),
+                        )
+                        .changed();
+                    if ui
+                        .add_enabled(
+                            assembly.bom.len() > 1,
+                            egui::Button::new(language.text("Remove")),
+                        )
+                        .clicked()
+                    {
+                        remove = Some(index);
+                    }
+                });
+            });
+            total = total - row.count + count;
+            assembly.bom[index] = BomLine {
+                product: product.unwrap(),
+                count,
+            };
+        }
+        if let Some(index) = remove {
+            total -= assembly.bom.remove(index).count;
             changed = true;
         }
+        let available = BOXES
+            .iter()
+            .map(|(id, _)| *id)
+            .chain(products.keys().map(String::as_str))
+            .find(|id| assembly.bom.iter().all(|row| row.product != *id));
+        if total < MAX_ASSEMBLY_COMPONENTS
+            && let Some(product) = available
+            && ui.button(language.text("Add component")).clicked()
+        {
+            assembly.bom.push(BomLine {
+                product: product.into(),
+                count: 1,
+            });
+            changed = true;
+        }
+        ui.separator();
+    } else {
+        let mut input = Some(machine.input.clone());
+        if product_picker(ui, language, "Input", &mut input, products, None) {
+            machine.input = input.unwrap();
+            changed = true;
+        }
+    }
+    let mut output = Some(machine.output.clone());
+    if product_picker(ui, language, "Good output", &mut output, products, None) {
+        machine.output = output.unwrap();
+        changed = true;
     }
     changed |= product_picker(
         ui,
@@ -364,15 +398,22 @@ pub fn machine(
     let name = robots
         .iter()
         .find_map(|(id, name)| (Some(id) == machine.unload_robot.as_ref()).then_some(name.as_str()))
-        .unwrap_or(language.text("Built-in gripper"));
+        .unwrap_or(language.text(
+            if machine.assembly.is_some() && machine.requires_operator() {
+                "Operator"
+            } else {
+                "Built-in gripper"
+            },
+        ));
+    let local_unload = if machine.assembly.is_some() && machine.requires_operator() {
+        "Operator"
+    } else {
+        "Built-in gripper"
+    };
     egui::ComboBox::from_label(language.text("Unload with"))
         .selected_text(name)
         .show_ui(ui, |ui| {
-            ui.selectable_value(
-                &mut machine.unload_robot,
-                None,
-                language.text("Built-in gripper"),
-            );
+            ui.selectable_value(&mut machine.unload_robot, None, language.text(local_unload));
             for (id, name) in robots {
                 ui.selectable_value(&mut machine.unload_robot, Some(id.clone()), name);
             }

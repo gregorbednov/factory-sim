@@ -28,6 +28,7 @@ struct Center {
     failure_rng: ChaCha8Rng,
     quality_rng: ChaCha8Rng,
     job: Option<Job>,
+    assembly: Option<AssemblyBuffer>,
     fault_tick: Option<u64>,
     repair: u64,
     technician: Option<String>,
@@ -39,8 +40,16 @@ struct Center {
     repair_ticks: u64,
 }
 
+struct AssemblyBuffer {
+    required: usize,
+    staged: Vec<String>,
+    loading: Option<(String, Transfer)>,
+    stack_height: f32,
+}
+
 struct Job {
     parcel: String,
+    components: Vec<String>,
     elapsed: u64,
     fail_at: Option<u64>,
     phase: JobPhase,
@@ -145,10 +154,26 @@ impl Simulation {
         let base = pose(part.position, part.yaw);
         match &part.kind {
             PartKind::Machine { machine } => {
-                self.world.colliders.insert(
-                    cuboid([2.0 * MACHINE_HALF_WIDTH, 0.6, 2.0 * MACHINE_HALF_WIDTH])
-                        .position(base * Isometry::translation(0.0, -0.3, 0.0)),
-                );
+                let width = 2.0 * MACHINE_HALF_WIDTH;
+                if machine.assembly.is_some() {
+                    self.world.colliders.insert(
+                        cuboid([width, 0.09, width])
+                            .position(base * Isometry::translation(0.0, -0.045, 0.0)),
+                    );
+                    for x in [-0.47, 0.47] {
+                        for z in [-0.47, 0.47] {
+                            self.world.colliders.insert(
+                                cuboid([0.09, 0.51, 0.09])
+                                    .position(base * Isometry::translation(x, -0.345, z)),
+                            );
+                        }
+                    }
+                } else {
+                    self.world.colliders.insert(
+                        cuboid([width, 0.6, width])
+                            .position(base * Isometry::translation(0.0, -0.3, 0.0)),
+                    );
+                }
                 let ports = [machine.intake, machine.outlet, machine.reject];
                 let supports = if machine.unload_robot.is_some() {
                     &ports[..1]
@@ -168,6 +193,12 @@ impl Simulation {
                         config: machine.clone(),
                         frame: base,
                         job: None,
+                        assembly: machine.assembly.as_ref().map(|assembly| AssemblyBuffer {
+                            required: assembly.bom.iter().map(|row| row.count as usize).sum(),
+                            staged: Vec::new(),
+                            loading: None,
+                            stack_height: 0.0,
+                        }),
                         fault_tick: None,
                         repair: 0,
                         technician: None,
@@ -235,6 +266,23 @@ impl Simulation {
                     }
                     Fence => {
                         self.world.colliders.insert(cuboid(*size).position(base));
+                    }
+                    FreeRoller | Chute => {
+                        let mut deck = base;
+                        if *equipment == Chute {
+                            deck *= Isometry::rotation(vector![0.0, 0.0, -production::CHUTE_SLOPE]);
+                            for ([x, y, z], rail) in production::chute_rails(*size) {
+                                self.world.colliders.insert(
+                                    cuboid(rail).position(deck * Isometry::translation(x, y, z)),
+                                );
+                            }
+                        }
+                        self.world.colliders.insert(
+                            cuboid(*size)
+                                .position(deck)
+                                .friction(0.04)
+                                .friction_combine_rule(CoefficientCombineRule::Min),
+                        );
                     }
                     StopBlade | SafetyDoor => {
                         let offset = if *equipment == StopBlade {
@@ -324,7 +372,9 @@ impl Simulation {
         }
         for part in parts.iter() {
             if let Some(center) = cells.machines.get_mut(&part.id) {
-                self.tick_center(part, center, operators.contains(&center.config.area));
+                let staffed =
+                    !center.config.requires_operator() || operators.contains(&center.config.area);
+                self.tick_center(part, center, staffed);
             }
         }
         for part in parts.iter() {
@@ -347,7 +397,8 @@ impl Simulation {
                     || staff.role == StaffRole::Operator
                         && flag(&self.tags, &part.id, "on_duty")
                         && cells.machines.iter().any(|(id, center)| {
-                            center.config.area == staff.area
+                            center.config.requires_operator()
+                                && center.config.area == staff.area
                                 && center.running
                                 && flag(&self.tags, id, "busy")
                                 && !flag(&self.tags, id, "fault")
@@ -597,6 +648,15 @@ impl Simulation {
     }
 
     fn nearest(&self, at: Isometry<Real>, within: Vector<Real>) -> Option<String> {
+        self.nearest_matching(at, within, |_| true)
+    }
+
+    fn nearest_matching(
+        &self,
+        at: Isometry<Real>,
+        within: Vector<Real>,
+        accepts: impl Fn(&Parcel) -> bool,
+    ) -> Option<String> {
         self.parcels
             .iter()
             .filter(|(_, parcel)| parcel.owner.is_none())
@@ -604,8 +664,7 @@ impl Simulation {
                 let delta = at.inverse_transform_point(&Point::from(
                     *self.world.bodies[parcel.body].translation(),
                 ));
-                (0..3)
-                    .all(|axis| delta[axis].abs() <= within[axis])
+                ((0..3).all(|axis| delta[axis].abs() <= within[axis]) && accepts(parcel))
                     .then_some((id, delta.coords.norm_squared()))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -652,6 +711,58 @@ impl Simulation {
         body.set_body_type(RigidBodyType::Dynamic, true);
         body.set_linvel(Vector::zeros(), true);
         body.set_angvel(Vector::zeros(), true);
+    }
+
+    fn tick_assembly_intake(&mut self, id: &str, center: &mut Center) -> bool {
+        let buffer = center.assembly.as_mut().unwrap();
+        if let Some((parcel, transfer)) = &mut buffer.loading {
+            let item = &self.parcels[parcel.as_str()];
+            if transfer.advance(&mut self.world.bodies[item.body]) {
+                buffer.stack_height += item.size[1] + 0.004;
+                buffer.staged.push(buffer.loading.take().unwrap().0);
+                if buffer.staged.len() == buffer.required {
+                    let mut components = std::mem::take(&mut buffer.staged);
+                    let parcel = components.remove(0);
+                    buffer.stack_height = 0.0;
+                    center.start_job(parcel, components, JobPhase::Machining);
+                }
+            }
+            return false;
+        }
+        let configuration = &center.config;
+        let [x, y, z] = configuration.intake;
+        let at = center.frame * Isometry::translation(x, y + 0.15, z);
+        let within = vector![0.28, 0.35, 0.28];
+        let parcel = self.nearest_matching(at, within, |item| {
+            !item.scrap
+                && configuration
+                    .assembly
+                    .as_ref()
+                    .unwrap()
+                    .bom
+                    .iter()
+                    .any(|row| {
+                        item.product.as_deref() == Some(row.product.as_str())
+                            && buffer
+                                .staged
+                                .iter()
+                                .filter(|id| {
+                                    self.parcels[id.as_str()].product.as_ref() == Some(&row.product)
+                                })
+                                .count()
+                                < row.count as usize
+                    })
+        });
+        let Some(parcel) = parcel else {
+            return self.nearest(at, within).is_some();
+        };
+        let item = &self.parcels[&parcel];
+        let current = *self.world.bodies[item.body].position();
+        let destination = center.frame
+            * Isometry::translation(0.0, buffer.stack_height + item.size[1] * 0.5 + 0.004, 0.0);
+        self.hold(&parcel, id);
+        buffer.loading = Some((parcel, Transfer::new(current, destination)));
+        false
     }
 
     fn tick_center(&mut self, part: &Part, center: &mut Center, operator: bool) {
@@ -725,8 +836,18 @@ impl Simulation {
                             } else {
                                 configuration.outlet
                             };
-                            let current = *self.world.bodies[item.body].position();
+                            let body = item.body;
+                            let input_height = item.size[1];
                             let size = self.finish_machining(&job.parcel, product, scrap);
+                            let mut current = *self.world.bodies[body].position();
+                            if configuration.assembly.is_some() {
+                                // Keep the bottom of the new shape at the same work surface.
+                                current.translation.y += (size[1] - input_height) * 0.5;
+                                self.world.bodies[body].set_position(current, true);
+                            }
+                            for component in job.components.drain(..) {
+                                self.remove_parcel(&component);
+                            }
                             let [x, y, z] = port;
                             let destination =
                                 base * Isometry::translation(x, y + size[1] * 0.5 + 0.005, z);
@@ -754,6 +875,8 @@ impl Simulation {
                     }
                     JobPhase::ReadyForRobot { .. } => {}
                 }
+            } else if center.assembly.is_some() {
+                input_error = self.tick_assembly_intake(id, center);
             } else {
                 let [x, y, z] = configuration.intake;
                 let at = base * Isometry::translation(x, y + 0.15, z);
@@ -766,15 +889,11 @@ impl Simulation {
                         let workholding =
                             base * Isometry::translation(0.0, item.size[1] * 0.5 + 0.05, 0.0);
                         self.hold(&parcel, id);
-                        let fail_at = (center.failure_rng.gen_range(0.0..100.0)
-                            < configuration.failure_percent)
-                            .then(|| center.failure_rng.gen_range(0..center.cycle_ticks));
-                        center.job = Some(Job {
+                        center.start_job(
                             parcel,
-                            elapsed: 0,
-                            fail_at,
-                            phase: JobPhase::Loading(Transfer::new(current, workholding)),
-                        });
+                            Vec::new(),
+                            JobPhase::Loading(Transfer::new(current, workholding)),
+                        );
                     }
                 }
             }
@@ -801,8 +920,27 @@ impl Simulation {
         let progress = center.job.as_ref().map_or(0.0, |job| {
             100.0 * job.elapsed as f32 / center.cycle_ticks as f32
         });
+        let loading = center
+            .assembly
+            .as_ref()
+            .is_some_and(|buffer| buffer.loading.is_some());
+        if let Some(buffer) = &center.assembly {
+            let collected = center.job.as_ref().map_or(buffer.staged.len(), |job| {
+                if matches!(job.phase, JobPhase::Machining) {
+                    buffer.required
+                } else {
+                    0
+                }
+            });
+            self.publish(id, "material_count", Value::Int(collected as i32));
+            self.publish(
+                id,
+                "waiting_material",
+                Value::Bool(center.running && center.job.is_none() && collected < buffer.required),
+            );
+        }
         for (role, state) in [
-            ("busy", center.job.is_some()),
+            ("busy", center.job.is_some() || loading),
             ("fault", center.emergency || center.fault_tick.is_some()),
             ("input_error", input_error),
             ("repairing", repairing && center.fault_tick.is_some()),
@@ -844,11 +982,15 @@ impl Simulation {
             .machines
             .iter()
             .filter_map(|(id, center)| {
-                let job = center.job.as_ref()?;
-                if !matches!(job.phase, JobPhase::Loading(_) | JobPhase::Unloading { .. }) {
-                    return None;
-                }
-                let item = &self.parcels[&job.parcel];
+                let parcel = if let Some(job) = &center.job {
+                    if !matches!(job.phase, JobPhase::Loading(_) | JobPhase::Unloading { .. }) {
+                        return None;
+                    }
+                    &job.parcel
+                } else {
+                    &center.assembly.as_ref()?.loading.as_ref()?.0
+                };
+                let item = &self.parcels[parcel];
                 let at = self.world.bodies[item.body].position();
                 let bounds = self.world.colliders[item.collider].shape().compute_aabb(at);
                 Some((
@@ -1174,6 +1316,20 @@ impl Simulation {
     }
 }
 
+impl Center {
+    fn start_job(&mut self, parcel: String, components: Vec<String>, phase: JobPhase) {
+        let fail_at = (self.failure_rng.gen_range(0.0..100.0) < self.config.failure_percent)
+            .then(|| self.failure_rng.gen_range(0..self.cycle_ticks));
+        self.job = Some(Job {
+            parcel,
+            components,
+            elapsed: 0,
+            fail_at,
+            phase,
+        });
+    }
+}
+
 fn within_reach(robot: &Robot, at: Vector<Real>) -> bool {
     at.iter()
         .zip(robot.reach())
@@ -1214,6 +1370,22 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn gravity_chute_moves_a_parcel_downhill_without_a_drive() -> Result<()> {
+        let mut sim = Simulation::new(project(vec![
+            json!({"id":"slide","name":"Slide","kind":"equipment","equipment":"chute",
+                "position":[0.0,0.6,0.0],"size":[2.0,0.08,0.8]}),
+            json!({"id":"box","name":"Box","kind":"crate","position":[-0.78,0.83,0.1],
+                "size":[0.2,0.14,0.2],"mass":1.0}),
+        ]))?;
+        for _ in 0..135 {
+            sim.step();
+        }
+        let p = sim.snapshot().parcels[0].position;
+        assert!(p[0] > -0.35 && p[1] > 0.55 && p[1] < 0.77, "{p:?}");
+        Ok(())
+    }
+
     fn center(id: &str, x: f32) -> Json {
         json!({"id":id,"name":id,"position":[x,0.60,0.0],"kind":"machine",
             "machine":{"seconds":0.25,"repair_seconds":0.2,"failure_percent":100,"scrap_percent":100}})
@@ -1227,6 +1399,116 @@ mod tests {
     fn personnel(id: &str, role: &str, calendar: &str) -> Json {
         json!({"id":id,"name":id,"position":[2.0,0.0,2.0],"kind":"staff",
             "staff":{"role":role,"area":"shop","calendar":calendar}})
+    }
+
+    fn assembly(mode: &str) -> Json {
+        json!({"id":"table","name":"Assembly","position":[0.0,0.60,0.0],"kind":"machine",
+        "machine":{"output":"assembled-product","seconds":0.25,"repair_seconds":0.2,
+            "assembly":{"mode":mode,"bom":[
+                {"product":"machined-base","count":2},{"product":"machined-lid","count":1}
+            ]}}})
+    }
+
+    fn feed_component(sim: &mut Simulation, id: &str, product: &str) {
+        let spec = sim.project.product(product).unwrap();
+        sim.spawn(
+            id.into(),
+            [-0.85, 0.605 + spec.size[1] * 0.5, 0.0],
+            0.0,
+            spec.size,
+            spec.mass,
+            Some(product.into()),
+        );
+    }
+
+    fn advance(sim: &mut Simulation, ticks: usize) {
+        for _ in 0..ticks {
+            sim.step();
+        }
+    }
+
+    #[test]
+    fn automatic_table_collects_exact_bom_and_unloads_one_product() -> Result<()> {
+        let mut sim = Simulation::new(project(vec![assembly("automatic")]))?;
+        sim.command("table.start", Value::Bool(true))?;
+        feed_component(&mut sim, "lid", "machined-lid");
+        let body = sim.parcels["lid"].body;
+        advance(&mut sim, 160);
+        assert_eq!(sim.tags["table.material_count"].value, Value::Int(1));
+        assert_eq!(sim.tags["table.required_count"].value, Value::Int(3));
+        assert!(flag(&sim.tags, "table", "waiting_material"));
+        assert!(!flag(&sim.tags, "table", "waiting_operator"));
+        feed_component(&mut sim, "extra-lid", "machined-lid");
+        advance(&mut sim, 20);
+        assert!(flag(&sim.tags, "table", "input_error"));
+        assert!(sim.parcels["extra-lid"].owner.is_none());
+        sim.remove_parcel("extra-lid");
+        feed_component(&mut sim, "base-one", "machined-base");
+        advance(&mut sim, 160);
+        assert_eq!(sim.tags["table.material_count"].value, Value::Int(2));
+        assert_eq!(number(&sim.tags, "table", "progress"), 0.0);
+        feed_component(&mut sim, "base-two", "machined-base");
+        advance(&mut sim, 450);
+        assert_eq!(sim.tags["table.good_count"].value, Value::Int(1));
+        assert_eq!(sim.tags["table.material_count"].value, Value::Int(0));
+        assert_eq!(sim.parcels.len(), 1);
+        let result = &sim.parcels["lid"];
+        assert_eq!(result.body, body);
+        assert_eq!(result.product.as_deref(), Some("assembled-product"));
+        assert!(result.owner.is_none());
+        assert!((sim.world.bodies[body].translation().x - 0.85).abs() < 0.05);
+        Ok(())
+    }
+
+    #[test]
+    fn manual_table_waits_for_shifts_and_keeps_components_during_failure() -> Result<()> {
+        let mut table = assembly("manual");
+        table["machine"]["scrap_percent"] = json!(100);
+        table["machine"]["failure_percent"] = json!(100);
+        let mut sim = Simulation::new(project(vec![
+            table,
+            personnel("op", "operator", "operator"),
+            personnel("tech", "technician", "tech"),
+        ]))?;
+        sim.command("table.start", Value::Bool(true))?;
+        feed_component(&mut sim, "a", "machined-base");
+        advance(&mut sim, 100);
+        assert!(flag(&sim.tags, "table", "waiting_operator"));
+        assert!(sim.parcels["a"].owner.is_none());
+        advance(&mut sim, 180);
+        assert_eq!(sim.tags["table.material_count"].value, Value::Int(1));
+        feed_component(&mut sim, "b", "machined-base");
+        advance(&mut sim, 160);
+        feed_component(&mut sim, "lid", "machined-lid");
+        advance(&mut sim, 220);
+        assert!(flag(&sim.tags, "table", "fault"));
+        assert_eq!(sim.tags["table.failure_count"].value, Value::Int(1));
+        assert_eq!(sim.tags["table.material_count"].value, Value::Int(3));
+        assert_eq!(sim.parcels.len(), 3);
+        assert_eq!(number(&sim.tags, "table", "repair_progress"), 0.0);
+        sim.tick = 61 * u64::from(HZ);
+        advance(&mut sim, 400);
+        assert_eq!(sim.tags["table.scrap_count"].value, Value::Int(1));
+        assert_eq!(sim.parcels.len(), 1);
+        assert!(sim.parcels["a"].scrap);
+        let at = sim.world.bodies[sim.parcels["a"].body].translation();
+        assert!((at.z - 0.85).abs() < 0.05);
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_rejects_invalid_bom() {
+        for bom in [
+            json!([]),
+            json!([{"product":"raw-blank","count":0}]),
+            json!([{"product":"missing","count":1}]),
+            json!([{"product":"raw-blank","count":33}]),
+            json!([{"product":"raw-blank","count":1},{"product":"raw-blank","count":1}]),
+        ] {
+            let mut table = assembly("automatic");
+            table["machine"]["assembly"]["bom"] = bom;
+            assert!(project(vec![table]).validate().is_err());
+        }
     }
 
     #[test]

@@ -22,6 +22,11 @@
             <path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/>
           </svg>
         </button>
+        <button id="step" type="button" aria-label="Один шаг симуляции" title="Один шаг симуляции" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M5 5v14l11-7zM17 5h2v14h-2z"/>
+          </svg>
+        </button>
         <button id="reset" type="button" aria-label="Сбросить симуляцию" title="Сбросить симуляцию" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M4 11a8 8 0 1 1 2.2 6.5M4 5v6h6" fill="none" stroke="currentColor"
@@ -29,7 +34,8 @@
           </svg>
         </button>
       </div>
-      <div class="commands" aria-label="Файлы проекта">
+      <div class="commands" aria-label="Редактирование и файлы проекта">
+        <button id="library" type="button" aria-pressed="false" disabled>Библиотека элементов</button>
         <button id="open" disabled>Открыть JSON</button>
         <button id="save" disabled>Скачать JSON</button>
         <input id="file" type="file" accept=".json,application/json" hidden>

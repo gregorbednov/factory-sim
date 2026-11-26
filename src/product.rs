@@ -74,7 +74,7 @@ const fn box_spec(
     }
 }
 
-pub const BOXES: [(&str, ProductSpec<'static>); 6] = [
+pub const BOXES: [(&str, ProductSpec<'static>); 7] = [
     (
         "box-carton",
         box_spec(
@@ -132,6 +132,16 @@ pub const BOXES: [(&str, ProductSpec<'static>); 6] = [
             [0.24, 0.04, 0.33],
             0.40,
             [66, 110, 180],
+            false,
+        ),
+    ),
+    (
+        "assembled-product",
+        box_spec(
+            "Assembled product",
+            [0.24, 0.12, 0.33],
+            1.23,
+            [58, 129, 143],
             false,
         ),
     ),

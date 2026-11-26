@@ -119,7 +119,7 @@ fn default_scale_capacity() -> u32 {
     20
 }
 
-#[cfg(feature = "studio")]
+#[cfg(any(feature = "studio", feature = "web"))]
 impl PartKind {
     pub fn label(&self) -> &'static str {
         match self {
@@ -132,7 +132,13 @@ impl PartKind {
             Self::Barrier { .. } => "Guard",
             Self::FlowGuide { .. } => "Passive flow guide",
             Self::Equipment { equipment, .. } => equipment.label(),
-            Self::Machine { .. } => "Machining center",
+            Self::Machine { machine } => {
+                match machine.assembly.as_ref().map(|assembly| assembly.mode) {
+                    Some(production::AssemblyMode::Manual) => "Manual assembly table",
+                    Some(production::AssemblyMode::Automatic) => "Automatic assembly table",
+                    None => "Machining center",
+                }
+            }
             Self::Robot { robot } if robot.two_axis => "Two-axis Pick & Place",
             Self::Robot { .. } => "XYZ Pick & Place",
             Self::Staff { staff } if staff.role == production::StaffRole::Technician => {
@@ -515,7 +521,7 @@ impl Project {
                         Capacitive => (&[], &["detected"]),
                         LightArray => (&[], &["aligned"]),
                         StackLight => (&["red", "yellow", "green"], &[]),
-                        Fence => (&[], &[]),
+                        Fence | FreeRoller | Chute => (&[], &[]),
                         SafetyDoor => (&["open"], &["closed", "obstructed"]),
                         Turntable => (
                             &["forward", "reverse", "turn"],
@@ -611,7 +617,7 @@ impl Project {
                         _ => {}
                     }
                 }
-                PartKind::Machine { .. } => {
+                PartKind::Machine { ref machine } => {
                     for name in ["start", "stop", "reset", "emergency"] {
                         role(name, name, Actuator, Bool(false), None);
                     }
@@ -630,9 +636,39 @@ impl Project {
                     for name in ["good_count", "scrap_count", "failure_count"] {
                         role(name, name, Sensor, Int(0), None);
                     }
+                    if let Some(assembly) = &machine.assembly {
+                        role(
+                            "waiting_material",
+                            "Waiting for components",
+                            Sensor,
+                            Bool(false),
+                            None,
+                        );
+                        role(
+                            "material_count",
+                            "Components collected",
+                            Sensor,
+                            Int(0),
+                            None,
+                        );
+                        let required = assembly.bom.iter().fold(0_i32, |sum, row| {
+                            sum.saturating_add(i32::try_from(row.count).unwrap_or(i32::MAX))
+                        });
+                        role(
+                            "required_count",
+                            "Components required",
+                            Sensor,
+                            Int(required),
+                            None,
+                        );
+                    }
                     role(
                         "progress",
-                        "Machining progress (%)",
+                        if machine.assembly.is_some() {
+                            "Assembly progress (%)"
+                        } else {
+                            "Machining progress (%)"
+                        },
                         Sensor,
                         Float(0.0),
                         Some([0.0, 100.0]),
@@ -799,8 +835,21 @@ impl Project {
                         .with_context(|| format!("machining time for {}", part.id))?;
                     production::ticks(machine.repair_seconds)
                         .with_context(|| format!("repair time for {}", part.id))?;
+                    if let Some(assembly) = &machine.assembly {
+                        let mut products = std::collections::BTreeSet::new();
+                        let total: u64 = assembly.bom.iter().map(|row| u64::from(row.count)).sum();
+                        ensure!(
+                            (1..=u64::from(production::MAX_ASSEMBLY_COMPONENTS)).contains(&total)
+                                && assembly.bom.iter().all(|row| row.count > 0
+                                    && self.product(&row.product).is_some()
+                                    && products.insert(&row.product)),
+                            "invalid bill of materials for {}: expected unique known products and 1 to {} components",
+                            part.id,
+                            production::MAX_ASSEMBLY_COMPONENTS
+                        );
+                    }
                     ensure!(
-                        self.product(&machine.input).is_some()
+                        (machine.assembly.is_some() || self.product(&machine.input).is_some())
                             && self.product(&machine.output).is_some()
                             && machine
                                 .scrap_product

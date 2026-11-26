@@ -4,6 +4,8 @@
 mod geometry;
 #[path = "studio/i18n.rs"]
 mod i18n;
+#[path = "studio/library.rs"]
+mod library;
 mod product;
 mod production;
 mod project;
@@ -21,7 +23,9 @@ use eframe::egui;
 use egui::Context;
 use wasm_bindgen::prelude::*;
 
-use project::{Project, Value};
+use i18n::Language;
+use production::Equipment;
+use project::{Part, PartKind, Project, Value};
 use sim::{HZ, Simulation, Snapshot};
 use viewport::{Camera, ObjectDrag};
 
@@ -30,6 +34,7 @@ const CELL: &str = include_str!("../examples/production-cell.json");
 struct Demo {
     sim: Simulation,
     draft: Option<Project>,
+    library: Option<library::Library>,
     snapshot: Snapshot,
     context: Context,
     last_frame: Option<f64>,
@@ -43,6 +48,7 @@ impl Demo {
             snapshot: sim.snapshot(),
             sim,
             draft: None,
+            library: None,
             context: Context::default(),
             last_frame: None,
             pending_ticks: 0.0,
@@ -51,6 +57,61 @@ impl Demo {
 
     fn project(&self) -> &Project {
         self.draft.as_ref().unwrap_or(&self.sim.project)
+    }
+
+    fn apply_draft(&mut self) -> anyhow::Result<()> {
+        if let Some(project) = &self.draft {
+            self.sim = Simulation::new(project.clone())?;
+            self.draft = None;
+            self.pending_ticks = 0.0;
+        }
+        Ok(())
+    }
+
+    fn edit(&mut self) -> &mut Project {
+        self.draft.get_or_insert_with(|| self.sim.project.clone())
+    }
+
+    fn place(&mut self, entry: library::Entry, at: Option<[f32; 2]>) -> String {
+        let project = self.edit();
+        let (serial, id) = (1..)
+            .map(|serial| (serial, format!("part-{serial}")))
+            .find(|(_, id)| project.parts.iter().all(|part| part.id != *id))
+            .unwrap();
+        let y = entry.height(project);
+        let [x, z] = at.unwrap_or([
+            (serial % 5) as f32 * 2.0 - 4.0,
+            -3.0 - (serial / 5) as f32 * 2.0,
+        ]);
+        // The demo has no live controller, so newly placed powered equipment gets
+        // a local start command. An exported project retains the same commands.
+        let command = match entry.kind {
+            PartKind::Emitter { .. } => Some("enabled"),
+            PartKind::Machine { .. } | PartKind::Robot { .. } => Some("start"),
+            PartKind::Equipment {
+                equipment:
+                    Equipment::Roller
+                    | Equipment::Scale
+                    | Equipment::Turntable
+                    | Equipment::ChainTransfer,
+                ..
+            } => Some("forward"),
+            _ => None,
+        };
+        if let Some(command) = command {
+            project
+                .initial_commands
+                .insert(format!("{id}.{command}"), Value::Bool(true));
+        }
+        project.parts.push(Part {
+            id: id.clone(),
+            name: entry.name,
+            position: [x, y, z],
+            yaw: 0.0,
+            product: entry.product,
+            kind: entry.kind,
+        });
+        id
     }
 
     fn refresh(&mut self) {
@@ -87,15 +148,41 @@ pub struct WebDemo {
 impl WebDemo {
     pub fn set_running(&self, running: bool) -> Result<(), JsValue> {
         let mut demo = self.demo.borrow_mut();
-        if running && let Some(project) = demo.draft.as_ref() {
-            let sim = Simulation::new(project.clone()).map_err(js_error)?;
-            demo.sim = sim;
-            demo.draft = None;
-            demo.pending_ticks = 0.0;
+        if running {
+            demo.apply_draft().map_err(js_error)?;
+            demo.library = None;
         }
         demo.sim.running = running;
         demo.last_frame = None;
         demo.refresh();
+        Ok(())
+    }
+
+    pub fn step(&self) -> Result<(), JsValue> {
+        let mut demo = self.demo.borrow_mut();
+        if demo.sim.running {
+            return Err(js_error("Поставьте симуляцию на паузу перед шагом"));
+        }
+        demo.apply_draft().map_err(js_error)?;
+        demo.last_frame = None;
+        demo.sim.step();
+        demo.refresh();
+        Ok(())
+    }
+
+    pub fn toggle_library(&self) -> Result<(), JsValue> {
+        let mut demo = self.demo.borrow_mut();
+        if demo.sim.running {
+            return Err(js_error(
+                "Поставьте симуляцию на паузу перед редактированием сцены",
+            ));
+        }
+        demo.library = if demo.library.is_some() {
+            None
+        } else {
+            Some(library::Library::new(demo.project(), Language::Russian))
+        };
+        demo.context.request_repaint();
         Ok(())
     }
 
@@ -129,6 +216,7 @@ impl WebDemo {
         serde_json::json!({
             "running": snap.running, "tick": snap.tick, "seconds": snap.elapsed_seconds,
             "name": demo.project().name, "edited": demo.draft.is_some(),
+            "library_open": demo.library.is_some(),
             "good": count("good_exit.count"), "scrap": count("reject_exit.count")
         })
         .to_string()
@@ -144,6 +232,7 @@ impl WebDemo {
         let mut demo = self.demo.borrow_mut();
         demo.sim = sim;
         demo.draft = None;
+        demo.library = None;
         demo.last_frame = None;
         demo.pending_ticks = 0.0;
         demo.refresh();
@@ -165,12 +254,13 @@ impl eframe::App for WebStudio {
         if demo.snapshot.running {
             self.object_drag = None;
         }
+        let mut placed = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 let interaction = viewport::draw(
                     ui,
-                    i18n::Language::Russian,
+                    Language::Russian,
                     &mut self.camera,
                     self.quality,
                     demo.project(),
@@ -183,30 +273,47 @@ impl eframe::App for WebStudio {
                 if let Some(selection) = interaction.selection {
                     self.selection = selection;
                 }
+                if let Some((entry, at)) = interaction.library_drop {
+                    placed = Some((entry, Some(at)));
+                }
                 if let Some((id, movement)) = interaction.movement {
-                    let draft = demo.project();
-                    if draft.parts.iter().any(|part| {
+                    let index = demo.project().parts.iter().position(|part| {
                         part.id == id
                             && (part.position != movement.position.to_array()
                                 || part.yaw != movement.yaw)
-                    }) {
-                        if demo.draft.is_none() {
-                            demo.draft = Some(demo.sim.project.clone());
-                        }
-                        if let Some(part) = demo
-                            .draft
-                            .as_mut()
-                            .unwrap()
-                            .parts
-                            .iter_mut()
-                            .find(|part| part.id == id)
-                        {
-                            part.position = movement.position.to_array();
-                            part.yaw = movement.yaw;
-                        }
+                    });
+                    if let Some(index) = index {
+                        let part = &mut demo.edit().parts[index];
+                        part.position = movement.position.to_array();
+                        part.yaw = movement.yaw;
                     }
                 }
             });
+        if placed.is_none()
+            && let Some(mut catalog) = demo.library.take()
+        {
+            let mut open = true;
+            let ctx = ui.ctx();
+            let width = (ctx.content_rect().width() - 24.0).clamp(150.0, 610.0);
+            let choice = egui::Window::new(Language::Russian.text("Element library"))
+                .open(&mut open)
+                .default_pos(ctx.content_rect().min + egui::vec2(12.0, 12.0))
+                .default_width(width)
+                .show(ctx, |ui| {
+                    catalog.ui(ui, demo.project(), &demo.snapshot, Language::Russian)
+                })
+                .and_then(|response| response.inner.flatten());
+            if let Some(library::Choice::Place(entry)) = choice {
+                placed = Some((entry, None));
+            } else if open {
+                demo.library = Some(catalog);
+            }
+        }
+        if let Some((entry, at)) = placed {
+            self.selection = Some(demo.place(entry, at));
+            demo.library = None;
+            ui.ctx().request_repaint();
+        }
     }
 }
 

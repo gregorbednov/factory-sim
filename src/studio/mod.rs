@@ -1,5 +1,6 @@
 mod geometry;
 mod i18n;
+mod library;
 mod production_ui;
 mod render;
 mod snap;
@@ -20,10 +21,11 @@ use eframe::{
     egui_wgpu::{WgpuSetup, WgpuSetupCreateNew},
 };
 use i18n::Language;
+use library::placement_height;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    product::{self, BOXES, Product, UpAxis},
+    product::{self, Product, UpAxis},
     production::{Equipment, Production},
     project::{Direction, Driver, Part, PartKind, Project, Tag, Value},
     runtime::{Action, Session},
@@ -183,6 +185,7 @@ fn theme(ctx: &egui::Context) {
 
 enum Dialog {
     New,
+    Library(library::Library),
     File {
         action: FileAction,
         path: String,
@@ -457,7 +460,13 @@ impl Studio {
         self.set_error(result);
     }
 
-    fn add_part(&mut self, kind: PartKind, product: Option<&str>) {
+    fn add_part(
+        &mut self,
+        kind: PartKind,
+        product: Option<&str>,
+        custom_name: Option<String>,
+        at: Option<[f32; 2]>,
+    ) {
         let id = loop {
             self.serial += 1;
             let id = format!("part-{}", self.serial);
@@ -466,8 +475,8 @@ impl Studio {
             }
         };
         let spec = product.and_then(|id| self.project.product(id));
-        let name = spec
-            .map_or_else(
+        let name = custom_name.unwrap_or_else(|| {
+            spec.map_or_else(
                 || self.settings.language.text(kind.label()),
                 |spec| {
                     if product.is_some_and(|id| self.project.products.contains_key(id)) {
@@ -477,25 +486,14 @@ impl Studio {
                     }
                 },
             )
-            .to_owned();
-        let y = spec.map_or_else(
-            || match kind {
-                PartKind::Equipment {
-                    equipment: Equipment::Fence | Equipment::SafetyDoor | Equipment::StackLight,
-                    size,
-                    ..
-                } => size[1] * 0.5,
-                PartKind::Staff { .. } | PartKind::Robot { .. } => 0.0,
-                PartKind::FlowGuide { height, .. } => 0.71 + height * 0.5,
-                _ => 0.6,
-            },
-            |spec| 0.02 + spec.size[1] * 0.5,
-        );
-        let x = (self.serial % 5) as f32 - 2.0;
+            .to_owned()
+        });
+        let y = placement_height(&kind, spec);
+        let [x, z] = at.unwrap_or([(self.serial % 5) as f32 - 2.0, -2.2]);
         self.project.parts.push(Part {
             id: id.clone(),
             name,
-            position: [x, y, -2.2],
+            position: [x, y, z],
             product: product.map(str::to_owned),
             yaw: 0.0,
             kind,
@@ -513,6 +511,8 @@ impl Studio {
                     mass: spec.mass,
                 },
                 Some(id),
+                None,
+                None,
             );
         }
     }
@@ -551,30 +551,34 @@ impl Studio {
                 indicator.on_hover_text(language.text("Unsaved project"));
             }
             ui.separator();
-            if ui
-                .add_enabled(
-                    !snapshot.running,
-                    egui::Button::new(language.text("Run")).fill(Color32::from_rgb(49, 87, 77)),
-                )
-                .clicked()
-            {
-                self.action(Action::Run);
-            }
-            if ui
-                .add_enabled(snapshot.running, egui::Button::new(language.text("Pause")))
-                .clicked()
-            {
-                self.action(Action::Pause);
-            }
-            if ui
-                .add_enabled(!snapshot.running, egui::Button::new(language.text("Step")))
-                .clicked()
-            {
-                self.action(Action::Step(1));
-            }
-            if ui.button(language.text("Reset")).clicked() {
-                self.action(Action::Reset);
-            }
+            let (playback, command, icon) = if snapshot.running {
+                ("Pause", Action::Pause, PlaybackIcon::Pause)
+            } else {
+                ("Run", Action::Run, PlaybackIcon::Play)
+            };
+            let border = ui.visuals().widgets.noninteractive.bg_stroke;
+            egui::Frame::new()
+                .stroke(border)
+                .fill(border.color)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 1.0;
+                    ui.horizontal(|ui| {
+                        for (label, icon, action, enabled) in [
+                            (playback, icon, command, true),
+                            (
+                                "Step",
+                                PlaybackIcon::Step,
+                                Action::Step(1),
+                                !snapshot.running,
+                            ),
+                            ("Reset", PlaybackIcon::Reset, Action::Reset, true),
+                        ] {
+                            if playback_button(ui, language.text(label), icon, enabled).clicked() {
+                                self.action(action);
+                            }
+                        }
+                    });
+                });
             let spacing = ui.spacing();
             let button_font = egui::TextStyle::Button.resolve(ui.style());
             let command_width = PROJECT_COMMANDS
@@ -686,52 +690,12 @@ impl Studio {
             ui.label(RichText::new(language.text("Scene")).size(19.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_enabled_ui(!running, |ui| {
-                    ui.menu_button(language.text("+ Add"), |ui| {
-                        for kind in palette() {
-                            if ui.button(language.text(kind.label())).clicked() {
-                                self.add_part(kind, None);
-                                ui.close();
-                            }
-                        }
-                        ui.menu_button(language.text("Equipment"), |ui| {
-                            for part in production_ui::equipment_palette() {
-                                if ui.button(language.text(part.label())).clicked() {
-                                    self.add_part(part, None);
-                                    ui.close();
-                                }
-                            }
-                        });
-                        ui.menu_button(language.text("Stations and staff"), |ui| {
-                            for part in production_ui::station_palette() {
-                                if ui.button(language.text(part.label())).clicked() {
-                                    self.add_part(part, None);
-                                    ui.close();
-                                }
-                            }
-                        });
-                        ui.menu_button(language.text("Products"), |ui| {
-                            let mut selected = None;
-                            for (id, spec) in &BOXES {
-                                if ui.button(language.text(spec.name)).clicked() {
-                                    selected = Some((*id).to_owned());
-                                }
-                            }
-                            for (id, product) in &self.project.products {
-                                if ui.button(&product.name).clicked() {
-                                    selected = Some(id.clone());
-                                }
-                            }
-                            if let Some(id) = selected {
-                                self.add_product(&id);
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                            ui.separator();
-                            if ui.button(language.text("Import 3D model…")).clicked() {
-                                self.dialog = Some(Dialog::Import(ImportProduct::default()));
-                                ui.close_kind(egui::UiKind::Menu);
-                            }
-                        });
-                    });
+                    if ui.button(language.text("+ Add")).clicked() {
+                        self.dialog = Some(Dialog::Library(library::Library::new(
+                            &self.project,
+                            language,
+                        )));
+                    }
                 });
             });
         });
@@ -1160,6 +1124,34 @@ impl Studio {
         let mut open = true;
         let mut done = false;
         match &mut dialog {
+            Dialog::Library(catalog) => {
+                if snapshot.running {
+                    done = true;
+                } else {
+                    let choice = egui::Window::new(language.text("Element library"))
+                        .open(&mut open)
+                        .default_pos(ctx.content_rect().min + egui::vec2(28.0, 88.0))
+                        .default_width(610.0)
+                        .show(ctx, |ui| catalog.ui(ui, &self.project, snapshot, language))
+                        .and_then(|response| response.inner.flatten());
+                    match choice {
+                        Some(library::Choice::Place(entry)) => {
+                            self.add_part(
+                                entry.kind,
+                                entry.product.as_deref(),
+                                Some(entry.name),
+                                None,
+                            );
+                            done = true;
+                        }
+                        Some(library::Choice::Import) => {
+                            self.dialog = Some(Dialog::Import(ImportProduct::default()));
+                            done = true;
+                        }
+                        None => {}
+                    }
+                }
+            }
             Dialog::New => {
                 egui::Window::new(language.text("New project"))
                     .open(&mut open)
@@ -1514,9 +1506,20 @@ impl eframe::App for Studio {
                     &snapshot,
                     self.selection.as_deref(),
                     self.dirty,
-                    !snapshot.running && self.dialog.is_none(),
+                    !snapshot.running
+                        && (self.dialog.is_none()
+                            || matches!(self.dialog, Some(Dialog::Library(_)))),
                     &mut self.object_drag,
                 );
+                if let Some((entry, at)) = interaction.library_drop {
+                    self.add_part(
+                        entry.kind,
+                        entry.product.as_deref(),
+                        Some(entry.name),
+                        Some(at),
+                    );
+                    self.dialog = None;
+                }
                 if let Some(selection) = interaction.selection {
                     self.selection = selection;
                     if self.selection.is_some() {
@@ -1561,6 +1564,85 @@ impl eframe::App for Studio {
     }
 }
 
+enum PlaybackIcon {
+    Play,
+    Pause,
+    Step,
+    Reset,
+}
+
+fn playback_button(ui: &mut Ui, label: &str, icon: PlaybackIcon, enabled: bool) -> egui::Response {
+    let mut button = egui::Button::new("")
+        .min_size(egui::vec2(34.0, 32.0))
+        .corner_radius(0)
+        .stroke(egui::Stroke::NONE);
+    if matches!(icon, PlaybackIcon::Play | PlaybackIcon::Pause) {
+        button = button.fill(Color32::from_rgb(49, 87, 77));
+    }
+    let response = ui.add_enabled(enabled, button);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    let color = ui.style().interact(&response).fg_stroke.color;
+    let color = if enabled {
+        color
+    } else {
+        color.gamma_multiply(0.5)
+    };
+    let stroke = egui::Stroke::new(1.8, color);
+    let center = response.rect.center();
+    let point = |x, y| center + egui::vec2(x, y);
+    let painter = ui.painter();
+
+    match icon {
+        PlaybackIcon::Play | PlaybackIcon::Step => {
+            let stepping = matches!(icon, PlaybackIcon::Step);
+            let offset = if stepping { -2.0 } else { 0.0 };
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    point(-4.5 + offset, -6.0),
+                    point(5.5 + offset, 0.0),
+                    point(-4.5 + offset, 6.0),
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+            if stepping {
+                painter.line_segment([point(6.0, -6.0), point(6.0, 6.0)], stroke);
+            }
+        }
+        PlaybackIcon::Pause => {
+            for x in [-5.0, 1.5] {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(point(x, -6.0), point(x + 3.5, 6.0)),
+                    0,
+                    color,
+                );
+            }
+        }
+        PlaybackIcon::Reset => {
+            let arc = (0..=18)
+                .map(|step| {
+                    let angle = (-173.0_f32 + step as f32 * 15.0).to_radians();
+                    point(angle.cos() * 6.4, angle.sin() * 6.4)
+                })
+                .collect();
+            painter.add(egui::Shape::line(arc, stroke));
+            painter.add(egui::Shape::line(
+                vec![point(-6.4, -5.3), point(-6.4, -0.8), point(-1.9, -0.8)],
+                stroke,
+            ));
+        }
+    }
+    if response.has_focus() {
+        painter.rect_stroke(
+            response.rect.shrink(2.0),
+            1.0,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_text(label).on_disabled_hover_text(label)
+}
+
 fn dimensions(ui: &mut Ui, values: &mut [f32; 3], range: std::ops::RangeInclusive<f32>) -> bool {
     ui.horizontal(|ui| {
         let mut changed = false;
@@ -1594,37 +1676,6 @@ fn parameter(
     .inner
 }
 
-fn palette() -> [PartKind; 7] {
-    [
-        PartKind::Conveyor {
-            size: [2.0, 0.22, 1.0],
-            speed: 1.0,
-        },
-        PartKind::Pusher {
-            stroke: 0.9,
-            speed: 1.0,
-        },
-        PartKind::Sensor { range: 1.2 },
-        PartKind::Emitter {
-            interval: 2.0,
-            emission: None,
-            random_spawn_belt: None,
-            size: [0.42, 0.38, 0.46],
-            mass: 2.0,
-        },
-        PartKind::Remover {
-            size: [0.3, 1.0, 1.2],
-        },
-        PartKind::Barrier {
-            size: [2.0, 0.25, 0.07],
-        },
-        PartKind::Crate {
-            size: [0.42, 0.38, 0.46],
-            mass: 2.0,
-        },
-    ]
-}
-
 #[cfg(test)]
 mod localization_tests {
     use super::*;
@@ -1650,10 +1701,7 @@ mod localization_tests {
 
     #[test]
     fn equipment_and_generated_tags_have_russian_labels() {
-        let kinds = palette()
-            .into_iter()
-            .chain(production_ui::equipment_palette())
-            .chain(production_ui::station_palette());
+        let kinds = library::presets();
         let mut project = Project::demo();
         project.parts.clear();
         project.tag_names.clear();
@@ -1681,7 +1729,7 @@ mod localization_tests {
                 tag.id
             );
         }
-        for (_, spec) in BOXES {
+        for (_, spec) in product::BOXES {
             assert_ne!(Language::Russian.text(spec.name), spec.name);
         }
     }

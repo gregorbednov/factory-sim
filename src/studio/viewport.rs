@@ -17,6 +17,19 @@ use crate::{
     sim::Snapshot,
 };
 
+#[path = "thumbnail.rs"]
+mod thumbnail;
+
+pub(super) fn part_thumbnail(
+    project: &Project,
+    part: &Part,
+    snapshot: &Snapshot,
+) -> egui::ColorImage {
+    let mut scene = Scene::default();
+    scene.part(project, part, snapshot, false, true);
+    thumbnail::render(&scene)
+}
+
 const STEEL: Color32 = Color32::from_rgb(151, 169, 178);
 const ALUMINUM: Color32 = Color32::from_rgb(193, 199, 202);
 const DRIVE: Color32 = Color32::from_rgb(54, 89, 113);
@@ -588,6 +601,58 @@ impl<'a> Scene<'a> {
                 let yellow = Color32::from_rgb(226, 176, 68);
                 let red = Color32::from_rgb(218, 70, 55);
                 match equipment {
+                    FreeRoller => {
+                        cylinder_at(
+                            self,
+                            [0.0; 3],
+                            [length, width, height],
+                            along_z,
+                            ALUMINUM,
+                            METAL,
+                        );
+                        for side in [-1.0, 1.0] {
+                            box_at(
+                                self,
+                                [0.0, -height * 0.28, side * width * 0.49],
+                                [length * 0.94, height * 0.45, 0.065],
+                                DRIVE,
+                            );
+                        }
+                    }
+                    Chute => {
+                        let tilt =
+                            rotation * Quat::from_rotation_z(-crate::production::CHUTE_SLOPE);
+                        self.block(
+                            center,
+                            Vec3::new(length, height, width),
+                            tilt,
+                            ALUMINUM,
+                            highlight,
+                        );
+                        for (at, size) in crate::production::chute_rails([length, height, width]) {
+                            self.block(
+                                center + tilt * Vec3::from(at),
+                                Vec3::from(size),
+                                tilt,
+                                STEEL,
+                                highlight,
+                            );
+                        }
+                        for x in [-0.36 * length, 0.36 * length] {
+                            let deck = center + tilt * Vec3::new(x, -height * 0.5, 0.0);
+                            let leg = deck.y.max(0.02);
+                            for side in [-1.0, 1.0] {
+                                self.block(
+                                    deck - Vec3::Y * leg * 0.5
+                                        + rotation * Vec3::Z * side * width * 0.36,
+                                    Vec3::new(0.075, leg, 0.075),
+                                    rotation,
+                                    DRIVE,
+                                    highlight,
+                                );
+                            }
+                        }
+                    }
                     Roller | Scale | Turntable | ChainTransfer => {
                         let top = height * 0.5;
                         let post = (width * 0.07).min(0.075);
@@ -903,144 +968,180 @@ impl<'a> Scene<'a> {
                 }
             }
             PartKind::Machine { ref machine } => {
-                let body = Color32::from_rgb(164, 183, 186);
-                box_at(self, [0.0, -0.30, 0.0], [1.10, 0.60, 1.10], DARK);
-                box_at(self, [0.0, -0.30, -0.558], [0.97, 0.45, 0.023], body);
-                for y in [-0.45, -0.405, -0.36, -0.315] {
-                    box_at(self, [0.28, y, -0.572], [0.25, 0.012, 0.009], DARK);
-                }
-                box_at(self, [-0.35, -0.18, -0.575], [0.075, 0.075, 0.025], DRIVE);
-                for x in [-0.50, 0.50] {
-                    for z in [-0.50, 0.50] {
-                        box_at(self, [x, 0.42, z], [0.12, 0.84, 0.12], body);
+                let manual = machine.assembly.is_some() && machine.requires_operator();
+                if machine.assembly.is_some() {
+                    let frame = if manual { DRIVE } else { STEEL };
+                    box_at(self, [0.0, -0.045, 0.0], [1.10, 0.09, 1.10], STEEL);
+                    for x in [-0.47, 0.47] {
+                        for z in [-0.47, 0.47] {
+                            box_at(self, [x, -0.345, z], [0.09, 0.51, 0.09], frame);
+                        }
+                        box_at(self, [x, -0.47, 0.0], [0.07, 0.06, 1.02], frame);
                     }
-                    // Lower openings leave the transfer path between the worktable and the conveyors.
-                    box_at(self, [x, 0.69, 0.0], [0.09, 0.35, 0.93], body);
-                }
-
-                // The rear service window also keeps the work area visible from the default view.
-                box_at(self, [0.0, 0.39, 0.525], [0.93, 0.075, 0.062], body);
-                box_at(self, [0.0, 0.80, 0.525], [0.98, 0.10, 0.062], body);
-                box_at(self, [0.0, 0.357, 0.525], [0.93, 0.05, 0.066], DARK);
-                self.window(
-                    center + rotation * Vec3::new(0.0, 0.586, 0.525),
-                    Vec3::new(0.895, 0.33, 0.006),
-                    rotation,
-                    highlight,
-                );
-                if machine.unload_robot.is_none() {
-                    box_at(self, [0.0, 0.91, 0.0], [1.10, 0.09, 1.10], body);
+                    if manual {
+                        box_at(self, [0.0, 0.16, 0.49], [1.10, 0.32, 0.08], DRIVE);
+                        for x in [-0.24, 0.0, 0.24] {
+                            box_at(self, [x, 0.049, 0.37], [0.20, 0.10, 0.13], GUARD);
+                        }
+                    } else {
+                        for x in [-0.49, 0.49] {
+                            for z in [-0.49, 0.49] {
+                                box_at(self, [x, 0.47, z], [0.065, 0.94, 0.065], frame);
+                            }
+                            box_at(self, [x, 0.92, 0.0], [0.10, 0.08, 1.08], frame);
+                        }
+                        box_at(self, [0.0, 0.92, 0.0], [1.10, 0.12, 0.15], DRIVE);
+                        box_at(self, [0.0, 0.84, 0.0], [0.22, 0.085, 0.20], STEEL);
+                    }
+                    let lamp = if !preview && flag(snapshot, &part.id, "fault") {
+                        Color32::from_rgb(225, 66, 54)
+                    } else if !preview && flag(snapshot, &part.id, "busy") {
+                        ACTIVE
+                    } else {
+                        GUARD
+                    };
+                    box_at(self, [0.44, 0.19, -0.48], [0.18, 0.28, 0.075], DARK);
+                    box_at(self, [0.44, 0.24, -0.52], [0.11, 0.10, 0.015], lamp);
                 } else {
-                    // The overhead opening leaves the gantry access to the spindle.
-                    box_at(self, [0.0, 0.87, -0.49], [1.10, 0.13, 0.18], body);
-                }
+                    let body = Color32::from_rgb(164, 183, 186);
+                    box_at(self, [0.0, -0.30, 0.0], [1.10, 0.60, 1.10], DARK);
+                    box_at(self, [0.0, -0.30, -0.558], [0.97, 0.45, 0.023], body);
+                    for y in [-0.45, -0.405, -0.36, -0.315] {
+                        box_at(self, [0.28, y, -0.572], [0.25, 0.012, 0.009], DARK);
+                    }
+                    box_at(self, [-0.35, -0.18, -0.575], [0.075, 0.075, 0.025], DRIVE);
+                    for x in [-0.50, 0.50] {
+                        for z in [-0.50, 0.50] {
+                            box_at(self, [x, 0.42, z], [0.12, 0.84, 0.12], body);
+                        }
+                        // Lower openings leave the transfer path between the worktable and the conveyors.
+                        box_at(self, [x, 0.69, 0.0], [0.09, 0.35, 0.93], body);
+                    }
 
-                let angle = if preview {
-                    0.0
-                } else {
-                    machine
-                        .door
-                        .as_deref()
-                        .map_or(0.0, |id| float(snapshot, id, "angle"))
-                };
-                let leaf = rotation * Quat::from_rotation_y(angle.to_radians());
-                let hinge = center + rotation * Vec3::new(-0.445, 0.0, -0.55);
-                let mut door_bar = |offset, size, color| {
-                    self.block(
-                        hinge + leaf * Vec3::from(offset),
-                        Vec3::from(size),
-                        leaf,
-                        color,
+                    // The rear service window also keeps the work area visible from the default view.
+                    box_at(self, [0.0, 0.39, 0.525], [0.93, 0.075, 0.062], body);
+                    box_at(self, [0.0, 0.80, 0.525], [0.98, 0.10, 0.062], body);
+                    box_at(self, [0.0, 0.357, 0.525], [0.93, 0.05, 0.066], DARK);
+                    self.window(
+                        center + rotation * Vec3::new(0.0, 0.586, 0.525),
+                        Vec3::new(0.895, 0.33, 0.006),
+                        rotation,
                         highlight,
                     );
-                };
-                door_bar([0.44, 0.115, 0.0], [0.88, 0.23, 0.064], body);
-                door_bar([0.44, 0.78, 0.0], [0.88, 0.13, 0.064], body);
-                for x in [0.04, 0.84] {
-                    door_bar([x, 0.47, 0.0], [0.08, 0.55, 0.064], DRIVE);
-                }
-                door_bar([0.76, 0.40, -0.072], [0.03, 0.15, 0.050], DARK);
-                for y in [0.335, 0.465] {
-                    door_bar([0.76, y, -0.046], [0.03, 0.028, 0.046], DARK);
-                }
-                self.window(
-                    hinge + leaf * Vec3::new(0.44, 0.4725, 0.0),
-                    Vec3::new(0.74, 0.495, 0.006),
-                    leaf,
-                    highlight,
-                );
+                    if machine.unload_robot.is_none() {
+                        box_at(self, [0.0, 0.91, 0.0], [1.10, 0.09, 1.10], body);
+                    } else {
+                        // The overhead opening leaves the gantry access to the spindle.
+                        box_at(self, [0.0, 0.87, -0.49], [1.10, 0.13, 0.18], body);
+                    }
 
-                box_at(self, [0.52, 0.59, -0.624], [0.21, 0.26, 0.095], DARK);
-                box_at(self, [0.52, 0.638, -0.676], [0.165, 0.102, 0.009], DRIVE);
-                for (x, color) in [
-                    (0.47, ACTIVE),
-                    (0.52, GUARD),
-                    (0.57, Color32::from_rgb(210, 61, 49)),
-                ] {
+                    let angle = if preview {
+                        0.0
+                    } else {
+                        machine
+                            .door
+                            .as_deref()
+                            .map_or(0.0, |id| float(snapshot, id, "angle"))
+                    };
+                    let leaf = rotation * Quat::from_rotation_y(angle.to_radians());
+                    let hinge = center + rotation * Vec3::new(-0.445, 0.0, -0.55);
+                    let mut door_bar = |offset, size, color| {
+                        self.block(
+                            hinge + leaf * Vec3::from(offset),
+                            Vec3::from(size),
+                            leaf,
+                            color,
+                            highlight,
+                        );
+                    };
+                    door_bar([0.44, 0.115, 0.0], [0.88, 0.23, 0.064], body);
+                    door_bar([0.44, 0.78, 0.0], [0.88, 0.13, 0.064], body);
+                    for x in [0.04, 0.84] {
+                        door_bar([x, 0.47, 0.0], [0.08, 0.55, 0.064], DRIVE);
+                    }
+                    door_bar([0.76, 0.40, -0.072], [0.03, 0.15, 0.050], DARK);
+                    for y in [0.335, 0.465] {
+                        door_bar([0.76, y, -0.046], [0.03, 0.028, 0.046], DARK);
+                    }
+                    self.window(
+                        hinge + leaf * Vec3::new(0.44, 0.4725, 0.0),
+                        Vec3::new(0.74, 0.495, 0.006),
+                        leaf,
+                        highlight,
+                    );
+
+                    box_at(self, [0.52, 0.59, -0.624], [0.21, 0.26, 0.095], DARK);
+                    box_at(self, [0.52, 0.638, -0.676], [0.165, 0.102, 0.009], DRIVE);
+                    for (x, color) in [
+                        (0.47, ACTIVE),
+                        (0.52, GUARD),
+                        (0.57, Color32::from_rgb(210, 61, 49)),
+                    ] {
+                        cylinder_at(
+                            self,
+                            [x, 0.51, -0.678],
+                            [0.024, 0.012, 0.024],
+                            along_z,
+                            color,
+                            POLYMER,
+                        );
+                    }
                     cylinder_at(
                         self,
-                        [x, 0.51, -0.678],
-                        [0.024, 0.012, 0.024],
-                        along_z,
-                        color,
+                        [0.11, 0.69, -0.14],
+                        [0.24, 0.30, 0.24],
+                        Quat::IDENTITY,
+                        DRIVE,
+                        METAL,
+                    );
+                    let progress = if preview {
+                        0.0
+                    } else {
+                        float(snapshot, &part.id, "progress") / 100.0
+                    };
+                    let gripping = !preview && snapshot.machine_grips.contains_key(&part.id);
+                    let spindle =
+                        if gripping || (!preview && flag(snapshot, &part.id, "waiting_unload")) {
+                            0.69
+                        } else {
+                            0.49 - 0.08 * (progress * 25.0).sin()
+                        };
+                    cylinder_at(
+                        self,
+                        [0.11, spindle, -0.14],
+                        [0.075, 0.28, 0.075],
+                        Quat::IDENTITY,
+                        ALUMINUM,
+                        METAL,
+                    );
+                    let status = if !preview
+                        && (flag(snapshot, &part.id, "fault")
+                            || flag(snapshot, &part.id, "input_error"))
+                    {
+                        Color32::from_rgb(225, 66, 54)
+                    } else if !preview && flag(snapshot, &part.id, "busy") {
+                        SELECT
+                    } else {
+                        ACTIVE
+                    };
+                    let beacon_z = -0.49;
+                    cylinder_at(
+                        self,
+                        [0.39, 0.97, beacon_z],
+                        [0.13, 0.035, 0.13],
+                        Quat::IDENTITY,
+                        DARK,
                         POLYMER,
                     );
+                    cylinder_at(
+                        self,
+                        [0.39, 1.03, beacon_z],
+                        [0.10, 0.095, 0.10],
+                        Quat::IDENTITY,
+                        status,
+                        [0.27, 0.0, 0.0, 0.68],
+                    );
                 }
-                cylinder_at(
-                    self,
-                    [0.11, 0.69, -0.14],
-                    [0.24, 0.30, 0.24],
-                    Quat::IDENTITY,
-                    DRIVE,
-                    METAL,
-                );
-                let progress = if preview {
-                    0.0
-                } else {
-                    float(snapshot, &part.id, "progress") / 100.0
-                };
-                let gripping = !preview && snapshot.machine_grips.contains_key(&part.id);
-                let spindle =
-                    if gripping || (!preview && flag(snapshot, &part.id, "waiting_unload")) {
-                        0.69
-                    } else {
-                        0.49 - 0.08 * (progress * 25.0).sin()
-                    };
-                cylinder_at(
-                    self,
-                    [0.11, spindle, -0.14],
-                    [0.075, 0.28, 0.075],
-                    Quat::IDENTITY,
-                    ALUMINUM,
-                    METAL,
-                );
-                let status = if !preview
-                    && (flag(snapshot, &part.id, "fault")
-                        || flag(snapshot, &part.id, "input_error"))
-                {
-                    Color32::from_rgb(225, 66, 54)
-                } else if !preview && flag(snapshot, &part.id, "busy") {
-                    SELECT
-                } else {
-                    ACTIVE
-                };
-                let beacon_z = -0.49;
-                cylinder_at(
-                    self,
-                    [0.39, 0.97, beacon_z],
-                    [0.13, 0.035, 0.13],
-                    Quat::IDENTITY,
-                    DARK,
-                    POLYMER,
-                );
-                cylinder_at(
-                    self,
-                    [0.39, 1.03, beacon_z],
-                    [0.10, 0.095, 0.10],
-                    Quat::IDENTITY,
-                    status,
-                    [0.27, 0.0, 0.0, 0.68],
-                );
                 let [x, y, z] = machine.intake;
                 box_at(self, [x, y - 0.024, z], [0.45, 0.038, 0.45], STEEL);
                 for ([x, y, z], color) in [
@@ -1053,7 +1154,10 @@ impl<'a> Scene<'a> {
                         box_at(self, [x, y + 0.006, z], [0.15, 0.012, 0.15], color);
                     }
                 }
-                if !preview && let Some(grip) = snapshot.machine_grips.get(&part.id) {
+                if !manual
+                    && !preview
+                    && let Some(grip) = snapshot.machine_grips.get(&part.id)
+                {
                     let grip = Vec3::from(*grip);
                     let lift = ((center.y + 0.94) - grip.y).max(0.05);
                     self.block(
@@ -1228,6 +1332,7 @@ pub struct ObjectDrag {
 pub struct Interaction {
     pub selection: Option<Option<String>>,
     pub movement: Option<(String, snap::Placement)>,
+    pub library_drop: Option<(super::library::Entry, [f32; 2])>,
 }
 
 fn box_depth(instance: &Instance, origin: Vec3, eye: Vec3) -> Option<f32> {
@@ -1346,6 +1451,7 @@ pub fn draw(
     let mut interaction = Interaction {
         selection: None,
         movement: None,
+        library_drop: None,
     };
     let delta = ui.input(|i| i.pointer.delta());
     if object_drag.is_none() && response.dragged_by(egui::PointerButton::Secondary) {
@@ -1361,6 +1467,20 @@ pub fn draw(
         camera.zoom = (camera.zoom * (zoom * 0.0018).exp()).clamp(0.28, 5.0);
     }
     view = View::new(rect, camera);
+    if editable
+        && let Some(entry) = response.dnd_release_payload::<super::library::Entry>()
+        && let Some(pointer) = ui.input(|i| i.pointer.latest_pos())
+    {
+        let plane = view.project(Vec3::Y * entry.height(project));
+        let position = view.ground_delta(pointer - plane);
+        interaction.library_drop = Some((
+            (*entry).clone(),
+            [
+                position.x.clamp(-1000.0, 1000.0),
+                position.z.clamp(-1000.0, 1000.0),
+            ],
+        ));
+    }
     let primary = egui::PointerButton::Primary;
     if response.clicked_by(primary) {
         let nearest = response

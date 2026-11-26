@@ -240,7 +240,11 @@ impl Simulation {
                     used_products.extend(rows.iter().filter_map(|row| row.product.as_deref()));
                 }
                 PartKind::Machine { machine } => {
-                    used_products.insert(machine.input.as_str());
+                    if let Some(assembly) = &machine.assembly {
+                        used_products.extend(assembly.bom.iter().map(|row| row.product.as_str()));
+                    } else {
+                        used_products.insert(machine.input.as_str());
+                    }
                     used_products.insert(machine.output.as_str());
                     used_products.extend(machine.scrap_product.as_deref());
                 }

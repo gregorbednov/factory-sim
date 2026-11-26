@@ -52,8 +52,8 @@ impl GraphicsQuality {
 
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
-struct Vertex {
-    position: [f32; 3],
+pub(super) struct Vertex {
+    pub(super) position: [f32; 3],
     normal: [f32; 3],
 }
 
@@ -832,7 +832,7 @@ fn texture_group(
     })
 }
 
-fn cube_vertices() -> Vec<Vertex> {
+pub(super) fn cube_vertices() -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(36);
     for normal in [
         Vec3::X,

@@ -1,7 +1,7 @@
 const byId = (id) => document.getElementById(id);
-const controls = ["playback", "reset", "open", "save"];
+const controls = ["playback", "step", "reset", "library", "open", "save"];
 const playback = byId("playback");
-const formatTime = new Intl.NumberFormat("ru", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const formatTime = new Intl.NumberFormat("ru", { minimumFractionDigits: 1, maximumFractionDigits: 3 });
 const notice = byId("notice");
 const errorText = (error) => error instanceof Error ? error.message : String(error);
 
@@ -47,7 +47,7 @@ async function boot() {
     const current = demo.status();
     if (current === last) return;
     last = current;
-    const { seconds, name, edited, good, scrap, running: isRunning } = JSON.parse(current);
+    const { seconds, name, edited, good, scrap, library_open, running: isRunning } = JSON.parse(current);
     running = isRunning;
     const nextAction = running ? "Пауза" : "Пуск";
     playback.disabled = false;
@@ -55,10 +55,13 @@ async function boot() {
     playback.setAttribute("aria-label", nextAction);
     byId("play-icon").toggleAttribute("hidden", running);
     byId("pause-icon").toggleAttribute("hidden", !running);
+    byId("step").disabled = running;
     byId("reset").disabled = false;
+    byId("library").disabled = running;
+    byId("library").setAttribute("aria-pressed", library_open);
     byId("open").disabled = running;
     byId("save").disabled = running;
-    byId("state").textContent = running ? "В работе" : edited ? "Пауза. Пуск применит размещение" : "На паузе";
+    byId("state").textContent = running ? "В работе" : edited ? "Пауза. Пуск или шаг применит изменения" : "На паузе";
     byId("project-name").textContent = name === "Production cell" ? "Производственная ячейка" : name;
     byId("time").textContent = `${formatTime.format(seconds)} с`;
     byId("good").textContent = good ?? "—";
@@ -78,6 +81,8 @@ async function boot() {
   }
 
   playback.addEventListener("click", action(() => demo.set_running(!running)));
+  byId("step").addEventListener("click", action(() => demo.step()));
+  byId("library").addEventListener("click", action(() => demo.toggle_library()));
   byId("reset").addEventListener("click", action(() => demo.reset()));
   byId("open").addEventListener("click", () => byId("file").click());
   byId("file").addEventListener("change", action(async () => {
