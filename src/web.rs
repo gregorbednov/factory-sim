@@ -1,5 +1,7 @@
 #![cfg(all(target_arch = "wasm32", feature = "web"))]
 
+#[path = "studio/editor_ui.rs"]
+mod editor_ui;
 #[path = "studio/geometry.rs"]
 mod geometry;
 #[path = "studio/i18n.rs"]
@@ -35,9 +37,19 @@ use viewport::{Camera, ObjectDrag};
 
 const CELL: &str = include_str!("../examples/production-cell.json");
 
+enum Dialog {
+    Production { json: String, error: Option<String> },
+    Settings,
+}
+
 struct Demo {
     sim: Simulation,
     draft: Option<Project>,
+    unsaved: bool,
+    dialog: Option<Dialog>,
+    scene_open: bool,
+    import_requested: bool,
+    reset_view: bool,
     library: Option<library::Library>,
     selection: Option<String>,
     inspector_open: bool,
@@ -56,9 +68,14 @@ impl Demo {
             snapshot: sim.snapshot(),
             sim,
             draft: None,
+            unsaved: false,
+            dialog: None,
+            scene_open: false,
+            import_requested: false,
+            reset_view: false,
             library: None,
             selection: None,
-            inspector_open: false,
+            inspector_open: true,
             show_tags: false,
             tag_error: None,
             context: Context::default(),
@@ -81,6 +98,7 @@ impl Demo {
     }
 
     fn edit(&mut self) -> &mut Project {
+        self.unsaved = true;
         self.draft.get_or_insert_with(|| self.sim.project.clone())
     }
 
@@ -134,7 +152,6 @@ impl Demo {
         if self.can_remove_selection()
             && let Some(id) = self.selection.take()
         {
-            self.inspector_open = false;
             self.edit().remove_part(&id);
             self.context.request_repaint();
         }
@@ -212,66 +229,49 @@ impl Demo {
         }
     }
 
-    fn show_inspector(&mut self, ctx: &Context) {
-        if !self.inspector_open {
-            return;
-        }
+    fn inspector_ui(&mut self, ui: &mut egui::Ui) {
+        let language = Language::Russian;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.show_tags, false, language.text("Inspector"));
+            ui.selectable_value(&mut self.show_tags, true, language.text("Tags"));
+        });
+        ui.separator();
+
         let Some(id) = self.selection.as_ref() else {
-            self.inspector_open = false;
+            ui.label(
+                language.text("Select a scene object to edit its properties and watch its tags."),
+            );
             return;
         };
         let Some(index) = self.project().parts.iter().position(|part| part.id == *id) else {
-            self.inspector_open = false;
             return;
         };
-
-        let language = Language::Russian;
-        let width = (ctx.content_rect().width() - 28.0).clamp(150.0, 338.0);
-        let mut open = true;
-        let mut show_tags = self.show_tags;
         let mut writes = Vec::new();
-        let max_height = (ctx.content_rect().height() - 88.0).clamp(100.0, 440.0);
-        let changed = egui::Window::new(language.text("Inspector"))
-            .open(&mut open)
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
-            .default_width(width)
-            .max_width(width)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut show_tags, false, language.text("Inspector"));
-                    ui.selectable_value(&mut show_tags, true, language.text("Tags"));
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt(show_tags)
-                    .max_height(max_height)
-                    .show(ui, |ui| {
-                        ui.push_id(id, |ui| {
-                            if show_tags {
-                                ui.label(&self.project().parts[index].name);
-                                self.show_tags(ui, language, id, &mut writes);
-                                None
-                            } else {
-                                if self.snapshot.running {
-                                    ui.label(language.text("Pause to edit properties"));
-                                }
-                                inspector::properties(
-                                    ui,
-                                    language,
-                                    self.project(),
-                                    index,
-                                    !self.snapshot.running,
-                                )
-                            }
-                        })
-                        .inner
-                    })
-                    .inner
+        let changed = egui::ScrollArea::vertical()
+            .id_salt(self.show_tags)
+            .max_height(ui.available_height())
+            .show(ui, |ui| {
+                ui.push_id(id, |ui| {
+                    if self.show_tags {
+                        ui.label(&self.project().parts[index].name);
+                        self.show_tags(ui, language, id, &mut writes);
+                        None
+                    } else {
+                        if self.snapshot.running {
+                            ui.label(language.text("Pause to edit properties"));
+                        }
+                        inspector::properties(
+                            ui,
+                            language,
+                            self.project(),
+                            index,
+                            !self.snapshot.running,
+                        )
+                    }
+                })
+                .inner
             })
-            .and_then(|window| window.inner.flatten());
-        self.inspector_open = open;
-        self.show_tags = show_tags;
+            .inner;
         if !writes.is_empty() {
             self.tag_error = self
                 .sim
@@ -282,7 +282,86 @@ impl Demo {
         }
         if let Some(part) = changed {
             self.edit().parts[index] = part;
-            ctx.request_repaint();
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn scene_ui(&mut self, ui: &mut egui::Ui) {
+        let language = Language::Russian;
+        let running = self.snapshot.running;
+        ui.horizontal(|ui| {
+            ui.heading(language.text("Scene"));
+            if ui
+                .add_enabled(!running, egui::Button::new(language.text("+ Add")))
+                .clicked()
+            {
+                self.library = Some(library::Library::new(self.project(), language));
+                self.scene_open = false;
+            }
+        });
+        ui.separator();
+        let mut selection = self.selection.clone();
+        let remove = editor_ui::scene_list(ui, language, self.project(), &mut selection, running);
+        if self.scene_open && selection != self.selection {
+            self.scene_open = false;
+            self.inspector_open = true;
+        }
+        self.selection = selection;
+        if let Some(id) = remove {
+            self.edit().remove_part(&id);
+            if self.selection.as_deref() == Some(&id) {
+                self.selection = None;
+            }
+        }
+    }
+
+    fn show_dialog(
+        &mut self,
+        ctx: &Context,
+        quality: &mut render::GraphicsQuality,
+        camera: &mut Camera,
+    ) {
+        let Some(mut dialog) = self.dialog.take() else {
+            return;
+        };
+        let mut open = true;
+        let language = Language::Russian;
+        match &mut dialog {
+            Dialog::Production { json, error } => {
+                let changed = egui::Window::new(language.text("Production"))
+                    .open(&mut open)
+                    .default_width((ctx.content_rect().width() - 30.0).clamp(230.0, 580.0))
+                    .show(ctx, |ui| {
+                        editor_ui::production(
+                            ui,
+                            language,
+                            self.project(),
+                            json,
+                            error,
+                            !self.snapshot.running,
+                        )
+                    })
+                    .and_then(|window| window.inner.flatten());
+                if let Some(settings) = changed {
+                    self.edit().production = settings;
+                    open = false;
+                }
+            }
+            Dialog::Settings => {
+                egui::Window::new(language.text("Settings"))
+                    .open(&mut open)
+                    .resizable(false)
+                    .show(ctx, |ui| {
+                        editor_ui::graphics_quality(ui, language, quality);
+                        ui.separator();
+                        if ui.button(language.text("Reset view")).clicked() {
+                            *camera = Camera::default();
+                        }
+                    });
+            }
+        }
+        if open {
+            self.dialog = Some(dialog);
         }
     }
 
@@ -311,13 +390,13 @@ impl Demo {
 }
 
 #[wasm_bindgen]
-pub struct WebDemo {
+pub struct WebApp {
     demo: Rc<RefCell<Demo>>,
     runner: eframe::WebRunner,
 }
 
 #[wasm_bindgen]
-impl WebDemo {
+impl WebApp {
     pub fn set_running(&self, running: bool) -> Result<(), JsValue> {
         let mut demo = self.demo.borrow_mut();
         if running {
@@ -352,7 +431,7 @@ impl WebDemo {
         demo.library = if demo.library.is_some() {
             None
         } else {
-            demo.inspector_open = false;
+            demo.dialog = None;
             Some(library::Library::new(demo.project(), Language::Russian))
         };
         demo.context.request_repaint();
@@ -361,13 +440,86 @@ impl WebDemo {
 
     pub fn toggle_inspector(&self) {
         let mut demo = self.demo.borrow_mut();
-        if demo.selection.is_some() {
-            demo.inspector_open = !demo.inspector_open;
-            if demo.inspector_open {
-                demo.library = None;
-            }
-            demo.context.request_repaint();
+        demo.inspector_open = demo.scene_open || !demo.inspector_open;
+        demo.scene_open = false;
+        demo.context.request_repaint();
+    }
+
+    pub fn toggle_scene(&self) {
+        let mut demo = self.demo.borrow_mut();
+        demo.scene_open = !demo.scene_open;
+        demo.context.request_repaint();
+    }
+
+    pub fn show_settings(&self) {
+        let mut demo = self.demo.borrow_mut();
+        demo.dialog = Some(Dialog::Settings);
+        demo.library = None;
+        demo.context.request_repaint();
+    }
+
+    pub fn show_production(&self) -> Result<(), JsValue> {
+        let mut demo = self.demo.borrow_mut();
+        let json = serde_json::to_string_pretty(&demo.project().production).map_err(js_error)?;
+        demo.dialog = Some(Dialog::Production { json, error: None });
+        demo.library = None;
+        demo.context.request_repaint();
+        Ok(())
+    }
+
+    pub fn take_import_request(&self) -> bool {
+        std::mem::take(&mut self.demo.borrow_mut().import_requested)
+    }
+
+    pub fn import_model(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+        scale: f64,
+        z_up: bool,
+        mass: f32,
+    ) -> Result<(), JsValue> {
+        if self.demo.borrow().sim.running {
+            return Err(js_error(
+                "Поставьте симуляцию на паузу перед импортом модели",
+            ));
         }
+        let up = if z_up {
+            product::UpAxis::Z
+        } else {
+            product::UpAxis::Y
+        };
+        let model = product::import_bytes(file_name, bytes, scale, up, mass).map_err(js_error)?;
+        let mut demo = self.demo.borrow_mut();
+        let entry = library::Entry::product(
+            (1..)
+                .map(|n| format!("product-{n}"))
+                .find(|id| !demo.project().products.contains_key(id))
+                .unwrap(),
+            model.name.clone(),
+            model.size,
+            model.mass,
+        );
+        demo.edit()
+            .products
+            .insert(entry.product.clone().unwrap(), model);
+        demo.selection = Some(demo.place(entry, None));
+        demo.library = None;
+        demo.context.request_repaint();
+        Ok(())
+    }
+
+    pub fn new_project(&self) -> Result<(), JsValue> {
+        let project = Project::empty(Language::Russian.text("Untitled line"));
+        self.swap_project(project, true)
+    }
+
+    pub fn open_example(&self) -> Result<(), JsValue> {
+        self.swap_project(serde_json::from_str(CELL).map_err(js_error)?, false)
+    }
+
+    pub fn mark_saved(&self) {
+        self.demo.borrow_mut().unsaved = false;
     }
 
     pub fn remove_selected(&self) {
@@ -381,13 +533,7 @@ impl WebDemo {
     }
 
     pub fn replace_project(&self, json: &str) -> Result<(), JsValue> {
-        let mut project: Project = serde_json::from_str(json).map_err(js_error)?;
-        // Retain mappings for round-tripping JSON. No network runtime is linked.
-        for driver in &mut project.drivers {
-            driver.enabled = false;
-        }
-        self.swap_simulation(Simulation::new(project).map_err(js_error)?);
-        Ok(())
+        self.swap_project(serde_json::from_str(json).map_err(js_error)?, false)
     }
 
     pub fn project_json(&self) -> Result<String, JsValue> {
@@ -403,7 +549,8 @@ impl WebDemo {
         };
         serde_json::json!({
             "running": snap.running, "tick": snap.tick, "seconds": snap.elapsed_seconds,
-            "name": demo.project().name, "edited": demo.draft.is_some(),
+            "name": demo.project().name, "edited": demo.draft.is_some(), "unsaved": demo.unsaved,
+            "scene_open": demo.scene_open,
             "library_open": demo.library.is_some(), "can_remove": demo.can_remove_selection(),
             "has_selection": demo.selection.is_some(), "inspector_open": demo.inspector_open,
             "good": count("good_exit.count"), "scrap": count("reject_exit.count")
@@ -416,14 +563,28 @@ impl WebDemo {
     }
 }
 
-impl WebDemo {
+impl WebApp {
+    fn swap_project(&self, project: Project, unsaved: bool) -> Result<(), JsValue> {
+        if self.demo.borrow().sim.running {
+            return Err(js_error(
+                "Поставьте симуляцию на паузу перед сменой проекта",
+            ));
+        }
+        self.swap_simulation(Simulation::new(project).map_err(js_error)?);
+        let mut demo = self.demo.borrow_mut();
+        demo.reset_view = true;
+        demo.unsaved = unsaved;
+        Ok(())
+    }
+
     fn swap_simulation(&self, sim: Simulation) {
         let mut demo = self.demo.borrow_mut();
         demo.sim = sim;
         demo.draft = None;
         demo.library = None;
         demo.selection = None;
-        demo.inspector_open = false;
+        demo.dialog = None;
+        demo.import_requested = false;
         demo.show_tags = false;
         demo.tag_error = None;
         demo.last_frame = None;
@@ -443,10 +604,27 @@ impl eframe::App for WebStudio {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let mut demo = self.demo.borrow_mut();
         demo.advance(ui.input(|input| input.time));
+        if std::mem::take(&mut demo.reset_view) {
+            self.camera = Camera::default();
+            self.object_drag = None;
+        }
         if demo.snapshot.running || demo.selection.is_none() {
             self.object_drag = None;
         }
         let mut placed = None;
+        let wide = ui.available_width() >= 820.0;
+        if wide {
+            egui::Panel::left("scene")
+                .default_size(205.0)
+                .min_size(168.0)
+                .show(ui, |ui| demo.scene_ui(ui));
+            if demo.inspector_open {
+                egui::Panel::right("inspector")
+                    .default_size(285.0)
+                    .min_size(224.0)
+                    .show(ui, |ui| demo.inspector_ui(ui));
+            }
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -459,7 +637,7 @@ impl eframe::App for WebStudio {
                     &demo.snapshot,
                     demo.selection.as_deref(),
                     demo.draft.is_some(),
-                    !demo.snapshot.running,
+                    !demo.snapshot.running && demo.dialog.is_none(),
                     &mut self.object_drag,
                 );
                 if let Some(selection) = interaction.selection {
@@ -495,10 +673,11 @@ impl eframe::App for WebStudio {
                     catalog.ui(ui, demo.project(), &demo.snapshot, Language::Russian)
                 })
                 .and_then(|response| response.inner.flatten());
-            if let Some(library::Choice::Place(entry)) = choice {
-                placed = Some((entry, None));
-            } else if open {
-                demo.library = Some(catalog);
+            match choice {
+                Some(library::Choice::Place(entry)) => placed = Some((entry, None)),
+                Some(library::Choice::Import) => demo.import_requested = true,
+                None if open => demo.library = Some(catalog),
+                None => {}
             }
         }
         if let Some((entry, at)) = placed {
@@ -508,8 +687,32 @@ impl eframe::App for WebStudio {
         }
 
         let ctx = ui.ctx();
-        demo.show_inspector(ctx);
+        if !wide && demo.library.is_none() && demo.dialog.is_none() {
+            if demo.scene_open {
+                let mut open = true;
+                egui::Window::new(Language::Russian.text("Scene"))
+                    .open(&mut open)
+                    .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
+                    .max_height((ctx.content_rect().height() - 48.0).max(100.0))
+                    .default_width(230.0)
+                    .show(ctx, |ui| demo.scene_ui(ui));
+                demo.scene_open &= open;
+            } else if demo.inspector_open && demo.selection.is_some() {
+                let mut open = true;
+                let width = (ctx.content_rect().width() - 28.0).clamp(150.0, 338.0);
+                egui::Window::new(Language::Russian.text("Inspector"))
+                    .open(&mut open)
+                    .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+                    .default_width(width)
+                    .max_width(width)
+                    .max_height((ctx.content_rect().height() - 48.0).max(100.0))
+                    .show(ctx, |ui| demo.inspector_ui(ui));
+                demo.inspector_open = open;
+            }
+        }
+        demo.show_dialog(ctx, &mut self.quality, &mut self.camera);
         if demo.can_remove_selection()
+            && demo.dialog.is_none()
             && !ctx.text_edit_focused()
             && !egui::Popup::is_any_open(ctx)
             && ctx.input_mut(|input| {
@@ -528,10 +731,7 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 }
 
 #[wasm_bindgen]
-pub async fn start_demo(
-    canvas: web_sys::HtmlCanvasElement,
-    webgl: bool,
-) -> Result<WebDemo, JsValue> {
+pub async fn start_app(canvas: web_sys::HtmlCanvasElement, webgl: bool) -> Result<WebApp, JsValue> {
     use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
 
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
@@ -572,7 +772,7 @@ pub async fn start_demo(
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Browser graphics unavailable"))?;
                 render::install(graphics);
-                cc.egui_ctx.set_visuals(egui::Visuals::dark());
+                editor_ui::theme(&cc.egui_ctx);
                 state.borrow_mut().context = cc.egui_ctx.clone();
                 Ok(Box::new(WebStudio {
                     demo: state,
@@ -587,5 +787,5 @@ pub async fn start_demo(
             }),
         )
         .await?;
-    Ok(WebDemo { demo, runner })
+    Ok(WebApp { demo, runner })
 }

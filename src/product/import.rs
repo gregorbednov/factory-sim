@@ -1,10 +1,7 @@
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Cursor, Read},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, io::Cursor, path::Path, sync::Arc};
+
+#[cfg(feature = "studio")]
+use std::{fs::File, io::Read};
 
 use anyhow::{Context, Result, bail, ensure};
 use truck_meshalgo::prelude::{MeshedShape, RobustMeshableShape};
@@ -20,16 +17,38 @@ pub enum UpAxis {
     Z,
 }
 
+#[cfg(feature = "studio")]
 pub fn import(path: &Path, meters_per_unit: f64, up: UpAxis, mass: f32) -> Result<Product> {
-    ensure!(
-        meters_per_unit.is_finite() && meters_per_unit > 0.0,
-        "invalid scale"
-    );
     let mut data = Vec::new();
     File::open(path)
         .with_context(|| format!("open {}", path.display()))?
         .take(MAX_BYTES + 1)
         .read_to_end(&mut data)?;
+    import_data(path, &data, meters_per_unit, up, mass)
+}
+
+#[cfg(feature = "web")]
+pub fn import_bytes(
+    file_name: &str,
+    data: &[u8],
+    meters_per_unit: f64,
+    up: UpAxis,
+    mass: f32,
+) -> Result<Product> {
+    import_data(Path::new(file_name), data, meters_per_unit, up, mass)
+}
+
+fn import_data(
+    path: &Path,
+    data: &[u8],
+    meters_per_unit: f64,
+    up: UpAxis,
+    mass: f32,
+) -> Result<Product> {
+    ensure!(
+        meters_per_unit.is_finite() && meters_per_unit > 0.0,
+        "invalid scale"
+    );
     ensure!(data.len() as u64 <= MAX_BYTES, "model file exceeds 32 MiB");
     let extension = path
         .extension()
@@ -37,9 +56,9 @@ pub fn import(path: &Path, meters_per_unit: f64, up: UpAxis, mass: f32) -> Resul
         .unwrap_or_default();
     let (geometry, raw) = match extension.to_ascii_lowercase().as_str() {
         "step" | "stp" => {
-            let source = String::from_utf8(data).context("STEP must be a text file")?;
+            let source = std::str::from_utf8(data).context("STEP must be a text file")?;
             let tolerance = (0.0001 / meters_per_unit).max(0.000001);
-            let mesh = std::panic::catch_unwind(|| read_step(&source, tolerance))
+            let mesh = std::panic::catch_unwind(|| read_step(source, tolerance))
                 .map_err(|_| anyhow::anyhow!("CAD kernel could not tessellate this STEP file"))??;
             (
                 Geometry::Step {
@@ -50,7 +69,7 @@ pub fn import(path: &Path, meters_per_unit: f64, up: UpAxis, mass: f32) -> Resul
                 mesh,
             )
         }
-        "obj" => (Geometry::Obj, read_obj(&data)?),
+        "obj" => (Geometry::Obj, read_obj(data)?),
         "stl" => {
             let mesh = stl_io::read_stl(&mut Cursor::new(data)).context("read STL mesh")?;
             ensure!(

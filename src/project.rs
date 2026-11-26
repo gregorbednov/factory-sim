@@ -316,6 +316,20 @@ impl Driver {
 }
 
 impl Project {
+    #[cfg(any(feature = "studio", feature = "web"))]
+    pub fn empty(name: &str) -> Self {
+        Self {
+            version: SCHEMA_VERSION,
+            name: name.into(),
+            production: Default::default(),
+            parts: Vec::new(),
+            products: Default::default(),
+            tag_names: Default::default(),
+            initial_commands: Default::default(),
+            drivers: Vec::new(),
+        }
+    }
+
     pub fn product(&self, id: &str) -> Option<ProductSpec<'_>> {
         self.products.get(id).map(Product::spec).or_else(|| {
             BOXES

@@ -1,0 +1,137 @@
+@import url("../tokens.css");
+@import url("../base.css");
+
+:root {
+  color-scheme: dark;
+  --color-paper: #1c2226;
+  --color-paper-2: #36494d;
+  --color-paper-3: #2a353a;
+  --color-ink: #e2eae9;
+  --color-ink-2: #9cadaf;
+  --color-accent: #77e3c1;
+  --color-accent-ink: #162723;
+  --color-accent-2: #355a51;
+  --stage: #283238;
+  --stage-outline: var(--color-accent);
+  --control-stroke: #526266;
+  --warning: #f9c070;
+}
+.workbench {
+  display: grid;
+  grid-template-rows: auto minmax(23rem, 1fr) auto;
+  min-height: 100dvh;
+}
+.toolbar, .status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .45rem .7rem;
+  padding: .55rem clamp(.65rem, 2vw, 1.4rem);
+}
+.toolbar { border-bottom: 1px solid var(--control-stroke); }
+.home { color: var(--color-accent); font-weight: 800; text-decoration: none; }
+.home:hover { color: var(--color-accent); }
+h1 {
+  flex: 1 1 10rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 1rem;
+  line-height: 1.35;
+  color: var(--color-ink-2);
+}
+.commands { display: flex; flex-wrap: wrap; gap: .35rem; }
+button, .project-menu summary {
+  border: 1px solid var(--control-stroke);
+  color: var(--color-ink);
+  background: var(--color-paper-3);
+  font-size: .875rem;
+  font-weight: 700;
+  padding: .48rem .7rem;
+  cursor: pointer;
+}
+button:not(:disabled):hover { background: var(--color-paper-2); }
+button:not(:disabled):active { transform: translateY(1px); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { color: var(--color-accent-ink); background: var(--color-accent); border-color: var(--color-accent); }
+button.primary:not(:disabled):hover { color: var(--color-ink); background: var(--color-accent-2); }
+.player {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--control-stroke);
+}
+.player button {
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  padding: 0;
+  border: 0;
+}
+.player button + button { border-inline-start: 1px solid var(--control-stroke); }
+.player button:focus-visible { outline-offset: -4px; outline-color: currentColor; }
+.player svg { width: 1.375rem; height: 1.375rem; }
+.stage { position: relative; background: var(--stage); min-width: 0; }
+canvas { display: block; width: 100%; height: 100%; position: absolute; inset: 0; }
+.stage:focus-within { outline: 2px solid var(--stage-outline); outline-offset: -3px; }
+.splash { position: absolute; inset: 0; display: grid; place-items: center; }
+.splash img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.splash-message {
+  position: relative;
+  align-self: end;
+  max-width: 52ch;
+  margin: 1rem;
+  padding: .6rem 1rem;
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: 2px solid var(--color-ink);
+  font-size: .9rem;
+}
+.status { border-top: 1px solid var(--control-stroke); font-size: .875rem; }
+.status output { font-weight: 800; }
+#notice, #unsaved, #model-error { color: var(--warning); }
+#unsaved { margin-inline-start: .45rem; font-size: .7em; }
+#scene-toggle { display: none; }
+@media (max-width: 819px) {
+  #scene-toggle { display: inline-block; }
+}
+.project-menu { position: relative; }
+.project-menu summary { list-style: none; }
+.project-menu summary::-webkit-details-marker { display: none; }
+.project-menu summary::after { content: " ▾"; color: var(--color-ink-2); }
+.project-menu[open] summary { background: var(--color-paper-2); }
+.project-actions {
+  position: absolute;
+  inset-inline-end: 0;
+  top: calc(100% + .25rem);
+  z-index: 2;
+  display: grid;
+  min-width: 13rem;
+  padding: .35rem;
+  gap: .15rem;
+  border: 1px solid var(--control-stroke);
+  background: var(--color-paper);
+}
+.project-actions button { text-align: start; }
+@media (max-width: 540px) {
+  .project-actions { position: fixed; inset-inline: .65rem; top: auto; }
+}
+dialog {
+  width: min(32rem, calc(100vw - 2rem));
+  background: var(--color-paper);
+  color: var(--color-ink);
+  border: 1px solid var(--control-stroke);
+  padding: 1.15rem;
+}
+dialog::backdrop { background: rgb(0 0 0 / 50%); }
+#model-form { display: grid; gap: .8rem; }
+#model-form h2 { font-size: 1.2rem; }
+#model-form label { display: grid; gap: .35rem; }
+#model-form input, #model-form select {
+  min-width: 0;
+  border: 1px solid var(--control-stroke);
+  padding: .45rem;
+  color: var(--color-ink);
+  background: var(--color-paper-3);
+  font: inherit;
+}
+.dialog-actions { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: flex-end; }

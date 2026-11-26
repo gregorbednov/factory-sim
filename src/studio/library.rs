@@ -203,6 +203,15 @@ impl Entry {
         }
     }
 
+    pub fn product(id: String, name: String, size: [f32; 3], mass: f32) -> Self {
+        Self {
+            name,
+            kind: PartKind::Crate { size, mass },
+            product: Some(id),
+            category: Category::Products,
+        }
+    }
+
     pub fn height(&self, project: &Project) -> f32 {
         placement_height(
             &self.kind,
@@ -225,7 +234,6 @@ impl Entry {
 
 pub(super) enum Choice {
     Place(Entry),
-    #[cfg(feature = "studio")]
     Import,
 }
 
@@ -317,12 +325,7 @@ impl Library {
                         .iter()
                         .map(|(id, spec)| (id.clone(), spec.name.clone(), spec.size, spec.mass)),
                 )
-                .map(|(id, name, size, mass)| Entry {
-                    name,
-                    kind: PartKind::Crate { size, mass },
-                    product: Some(id),
-                    category: Category::Products,
-                }),
+                .map(|(id, name, size, mass)| Entry::product(id, name, size, mass)),
         );
         Self {
             entries,
@@ -345,7 +348,6 @@ impl Library {
                     egui::TextEdit::singleline(&mut self.query)
                         .hint_text(language.text("Search elements")),
                 );
-                #[cfg(feature = "studio")]
                 if ui.button(language.text("Import 3D model…")).clicked() {
                     return Some(Choice::Import);
                 }

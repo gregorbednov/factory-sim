@@ -1,3 +1,4 @@
+mod editor_ui;
 mod geometry;
 mod i18n;
 mod inspector;
@@ -17,6 +18,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::Datelike;
 use clap::ValueEnum;
+use editor_ui::{ACCENT, MUTE, TEXT, WARN, theme};
 use eframe::{
     egui::{self, Color32, RichText, Ui},
     egui_wgpu::{WgpuSetup, WgpuSetupCreateNew},
@@ -28,17 +30,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     product::{self, Product, UpAxis},
-    production::Production,
     project::{Direction, Driver, Part, PartKind, Project, Tag},
     runtime::{Action, Session},
     sim::{HZ, Quality, Snapshot},
 };
-
-const PANEL: Color32 = Color32::from_rgb(28, 34, 38);
-const TEXT: Color32 = Color32::from_rgb(226, 234, 233);
-const MUTE: Color32 = Color32::from_rgb(156, 173, 175);
-const ACCENT: Color32 = Color32::from_rgb(119, 227, 193);
-const WARN: Color32 = Color32::from_rgb(249, 192, 112);
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, ValueEnum, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -165,24 +160,6 @@ pub fn open(
         }),
     )
     .map_err(|e| anyhow!("starting {} editor: {e}", backend.label()))
-}
-
-fn theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = PANEL;
-    visuals.window_fill = PANEL;
-    visuals.override_text_color = Some(TEXT);
-    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(37, 45, 50);
-    visuals.widgets.inactive.bg_fill = Color32::from_rgb(42, 53, 58);
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(54, 73, 77);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(53, 90, 81);
-    visuals.selection.bg_fill = Color32::from_rgb(52, 93, 81);
-    visuals.selection.stroke.color = ACCENT;
-    ctx.set_visuals(visuals);
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    });
 }
 
 enum Dialog {
@@ -702,37 +679,12 @@ impl Studio {
             });
         });
         ui.separator();
-        let mut remove = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for part in &self.project.parts {
-                ui.push_id(&part.id, |ui| {
-                    let selected = self.selection.as_deref() == Some(&part.id);
-                    let color = match part.kind {
-                        PartKind::Sensor { .. } | PartKind::Emitter { .. } => ACCENT,
-                        PartKind::Pusher { .. } | PartKind::Crate { .. } => WARN,
-                        _ => MUTE,
-                    };
-                    let row = ui.selectable_label(selected, RichText::new(&part.name).color(color));
-                    if row.clicked() {
-                        self.selection = Some(part.id.clone());
-                        self.show_tags = false;
-                    }
-                    row.context_menu(|ui| {
-                        if ui
-                            .add_enabled(
-                                !running,
-                                egui::Button::new(language.text("Remove object"))
-                                    .shortcut_text("Delete"),
-                            )
-                            .clicked()
-                        {
-                            remove = Some(part.id.clone());
-                            ui.close();
-                        }
-                    });
-                });
-            }
-        });
+        let mut selection = self.selection.clone();
+        let remove = editor_ui::scene_list(ui, language, &self.project, &mut selection, running);
+        if selection != self.selection {
+            self.selection = selection;
+            self.show_tags = false;
+        }
         if let Some(id) = remove {
             self.remove_part(&id);
         }
@@ -969,16 +921,7 @@ impl Studio {
                             );
                         }
                         if ui.button(language.text("Create empty project")).clicked() {
-                            let project = Project {
-                                version: crate::project::SCHEMA_VERSION,
-                                name: language.text("Untitled line").into(),
-                                production: Default::default(),
-                                parts: Vec::new(),
-                                products: Default::default(),
-                                tag_names: Default::default(),
-                                initial_commands: Default::default(),
-                                drivers: Vec::new(),
-                            };
+                            let project = Project::empty(language.text("Untitled line"));
                             match Session::new(project.clone(), true) {
                                 Ok(session) => {
                                     self.project = project;
@@ -1101,37 +1044,17 @@ impl Studio {
                     .open(&mut open)
                     .default_width(600.0)
                     .show(ctx, |ui| {
-                        ui.label(language.text("Initial simulated date, seed and work calendars"));
-                        if ui.button(language.text("Add weekday calendar")).clicked() {
-                            match serde_json::from_str::<Production>(json) {
-                                Ok(mut settings) => {
-                                    let index = (1..).find(|i| !settings.calendars.contains_key(&format!("shift-{i}"))).unwrap();
-                                    let calendar = serde_json::from_str(r#"{"weekly":[{"days":[1,2,3,4,5],"start_minute":480,"end_minute":960}]}"#).unwrap();
-                                    settings.calendars.insert(format!("shift-{index}"), calendar);
-                                    *json = serde_json::to_string_pretty(&settings).unwrap();
-                                    *error = None;
-                                }
-                                Err(err) => *error = Some(err.to_string()),
-                            }
-                        }
-                        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
-                            ui.add(egui::TextEdit::multiline(json).code_editor().desired_rows(14).desired_width(f32::INFINITY));
-                        });
-                        if let Some(error) = error.as_ref() {
-                            ui.colored_label(WARN, language.error(error));
-                        }
-                        if ui.add_enabled(!snapshot.running, egui::Button::new(language.text("Apply production settings"))).clicked() {
-                            let result = (|| {
-                                let settings: Production = serde_json::from_str(json)?;
-                                let mut project = self.project.clone();
-                                project.production = settings;
-                                project.validate()?;
-                                self.project = project;
-                                self.edit();
-                                Ok::<_, anyhow::Error>(())
-                            })();
-                            *error = result.err().map(|err| format!("{err:#}"));
-                            done = error.is_none();
+                        if let Some(settings) = editor_ui::production(
+                            ui,
+                            language,
+                            &self.project,
+                            json,
+                            error,
+                            !snapshot.running,
+                        ) {
+                            self.project.production = settings;
+                            self.edit();
+                            done = true;
                         }
                     });
             }
@@ -1156,22 +1079,11 @@ impl Studio {
                         });
                         ui.separator();
                         let previous_quality = self.settings.graphics_quality;
-                        ui.label(language.text("Graphics quality"));
-                        let labels = ["Performance", "Balanced", "High quality"];
-                        let values = [
-                            render::GraphicsQuality::Performance,
-                            render::GraphicsQuality::Balanced,
-                            render::GraphicsQuality::High,
-                        ];
-                        ui.horizontal(|ui| {
-                            for (quality, label) in values.into_iter().zip(labels) {
-                                ui.radio_value(
-                                    &mut self.settings.graphics_quality,
-                                    quality,
-                                    language.text(label),
-                                );
-                            }
-                        });
+                        editor_ui::graphics_quality(
+                            ui,
+                            language,
+                            &mut self.settings.graphics_quality,
+                        );
                         ui.separator();
                         ui.label(format!(
                             "{} · {} · {}",
