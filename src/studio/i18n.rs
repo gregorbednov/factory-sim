@@ -45,6 +45,7 @@ impl Language {
             "Import 3D model…" => "Импорт 3D-модели…",
             "Remove object" => "Удалить объект",
             "Inspector" => "Свойства",
+            "Pause to edit properties" => "Поставьте симуляцию на паузу, чтобы изменить свойства.",
             "All tags" => "Все теги",
             "Select a scene object to edit its properties and watch its tags." => {
                 "Выберите объект на сцене, чтобы изменить его свойства и посмотреть теги."

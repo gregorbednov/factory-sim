@@ -4,10 +4,14 @@
 mod geometry;
 #[path = "studio/i18n.rs"]
 mod i18n;
+#[path = "studio/inspector.rs"]
+mod inspector;
 #[path = "studio/library.rs"]
 mod library;
 mod product;
 mod production;
+#[path = "studio/production_ui.rs"]
+mod production_ui;
 mod project;
 #[path = "studio/render.rs"]
 mod render;
@@ -36,6 +40,7 @@ struct Demo {
     draft: Option<Project>,
     library: Option<library::Library>,
     selection: Option<String>,
+    inspector_open: bool,
     snapshot: Snapshot,
     context: Context,
     last_frame: Option<f64>,
@@ -51,6 +56,7 @@ impl Demo {
             draft: None,
             library: None,
             selection: None,
+            inspector_open: false,
             context: Context::default(),
             last_frame: None,
             pending_ticks: 0.0,
@@ -124,8 +130,56 @@ impl Demo {
         if self.can_remove_selection()
             && let Some(id) = self.selection.take()
         {
+            self.inspector_open = false;
             self.edit().remove_part(&id);
             self.context.request_repaint();
+        }
+    }
+
+    fn show_inspector(&mut self, ctx: &Context) {
+        if !self.inspector_open {
+            return;
+        }
+        let Some(id) = self.selection.as_ref() else {
+            self.inspector_open = false;
+            return;
+        };
+        let Some(index) = self.project().parts.iter().position(|part| part.id == *id) else {
+            self.inspector_open = false;
+            return;
+        };
+
+        let language = Language::Russian;
+        let width = (ctx.content_rect().width() - 28.0).clamp(150.0, 338.0);
+        let mut open = true;
+        let changed = egui::Window::new(language.text("Inspector"))
+            .open(&mut open)
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .default_width(width)
+            .max_width(width)
+            .max_height((ctx.content_rect().height() - 64.0).max(100.0))
+            .resizable(false)
+            .vscroll(true)
+            .show(ctx, |ui| {
+                if self.snapshot.running {
+                    ui.label(language.text("Pause to edit properties"));
+                }
+                ui.push_id(id, |ui| {
+                    inspector::properties(
+                        ui,
+                        language,
+                        self.project(),
+                        index,
+                        !self.snapshot.running,
+                    )
+                })
+                .inner
+            })
+            .and_then(|window| window.inner.flatten());
+        self.inspector_open = open;
+        if let Some(part) = changed {
+            self.edit().parts[index] = part;
+            ctx.request_repaint();
         }
     }
 
@@ -195,10 +249,22 @@ impl WebDemo {
         demo.library = if demo.library.is_some() {
             None
         } else {
+            demo.inspector_open = false;
             Some(library::Library::new(demo.project(), Language::Russian))
         };
         demo.context.request_repaint();
         Ok(())
+    }
+
+    pub fn toggle_inspector(&self) {
+        let mut demo = self.demo.borrow_mut();
+        if demo.selection.is_some() {
+            demo.inspector_open = !demo.inspector_open;
+            if demo.inspector_open {
+                demo.library = None;
+            }
+            demo.context.request_repaint();
+        }
     }
 
     pub fn remove_selected(&self) {
@@ -236,6 +302,7 @@ impl WebDemo {
             "running": snap.running, "tick": snap.tick, "seconds": snap.elapsed_seconds,
             "name": demo.project().name, "edited": demo.draft.is_some(),
             "library_open": demo.library.is_some(), "can_remove": demo.can_remove_selection(),
+            "has_selection": demo.selection.is_some(), "inspector_open": demo.inspector_open,
             "good": count("good_exit.count"), "scrap": count("reject_exit.count")
         })
         .to_string()
@@ -253,6 +320,7 @@ impl WebDemo {
         demo.draft = None;
         demo.library = None;
         demo.selection = None;
+        demo.inspector_open = false;
         demo.last_frame = None;
         demo.pending_ticks = 0.0;
         demo.refresh();
@@ -335,6 +403,7 @@ impl eframe::App for WebStudio {
         }
 
         let ctx = ui.ctx();
+        demo.show_inspector(ctx);
         if demo.can_remove_selection()
             && !ctx.text_edit_focused()
             && !egui::Popup::is_any_open(ctx)

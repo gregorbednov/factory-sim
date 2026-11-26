@@ -1,4 +1,7 @@
-use super::i18n::Language;
+use super::{
+    i18n::Language,
+    inspector::{dimensions, parameter},
+};
 use eframe::egui::{self, Ui};
 use std::collections::BTreeMap;
 
@@ -432,7 +435,7 @@ pub fn machine(
             ("Reject output", &mut machine.reject),
         ] {
             ui.label(language.text(label));
-            changed |= super::dimensions(ui, at, -1000.0..=1000.0);
+            changed |= dimensions(ui, at, -1000.0..=1000.0);
         }
     });
     changed
@@ -463,7 +466,7 @@ pub fn staff(ui: &mut Ui, language: Language, staff: &mut Staff, production: &Pr
 }
 
 pub fn robot(ui: &mut Ui, language: Language, robot: &mut Robot, unload: bool) -> bool {
-    let mut changed = super::parameter(
+    let mut changed = parameter(
         ui,
         language.text("Speed (m/s)"),
         &mut robot.speed,
@@ -542,13 +545,8 @@ pub fn robot(ui: &mut Ui, language: Language, robot: &mut Robot, unload: bool) -
                         }
                     }
                     RobotStep::Rotate { degrees } => {
-                        changed |= super::parameter(
-                            ui,
-                            language.text("Angle (°)"),
-                            degrees,
-                            -360.0..=360.0,
-                            1.0,
-                        )
+                        changed |=
+                            parameter(ui, language.text("Angle (°)"), degrees, -360.0..=360.0, 1.0)
                     }
                     RobotStep::Wait { seconds } => {
                         changed |= duration(ui, language, "Wait", seconds)
