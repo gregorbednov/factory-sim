@@ -1,5 +1,6 @@
 const byId = (id) => document.getElementById(id);
-const controls = ["run", "pause", "reset", "open", "save"];
+const controls = ["playback", "reset", "open", "save"];
+const playback = byId("playback");
 const formatTime = new Intl.NumberFormat("ru", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const notice = byId("notice");
 const errorText = (error) => error instanceof Error ? error.message : String(error);
@@ -41,13 +42,19 @@ async function boot() {
   byId("splash").hidden = true;
 
   let last;
+  let running = false;
   function update() {
     const current = demo.status();
     if (current === last) return;
     last = current;
-    const { running, seconds, name, edited, good, scrap } = JSON.parse(current);
-    byId("run").disabled = running;
-    byId("pause").disabled = !running;
+    const { seconds, name, edited, good, scrap, running: isRunning } = JSON.parse(current);
+    running = isRunning;
+    const nextAction = running ? "Пауза" : "Пуск";
+    playback.disabled = false;
+    playback.title = nextAction;
+    playback.setAttribute("aria-label", nextAction);
+    byId("play-icon").toggleAttribute("hidden", running);
+    byId("pause-icon").toggleAttribute("hidden", !running);
     byId("reset").disabled = false;
     byId("open").disabled = running;
     byId("save").disabled = running;
@@ -70,8 +77,7 @@ async function boot() {
     };
   }
 
-  byId("run").addEventListener("click", action(() => demo.set_running(true)));
-  byId("pause").addEventListener("click", action(() => demo.set_running(false)));
+  playback.addEventListener("click", action(() => demo.set_running(!running)));
   byId("reset").addEventListener("click", action(() => demo.reset()));
   byId("open").addEventListener("click", () => byId("file").click());
   byId("file").addEventListener("change", action(async () => {

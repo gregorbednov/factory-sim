@@ -13,10 +13,21 @@
     <header class="toolbar">
       <a class="home" href="../">Factory Sim</a>
       <h1 id="project-name">Производственная ячейка</h1>
-      <div class="commands" aria-label="Управление симуляцией">
-        <button id="run" class="primary" disabled>Пуск</button>
-        <button id="pause" disabled>Пауза</button>
-        <button id="reset" disabled>Сброс</button>
+      <div class="player" role="group" aria-label="Управление симуляцией">
+        <button id="playback" class="primary" type="button" aria-label="Пуск" title="Пуск" disabled>
+          <svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path fill="currentColor" d="M7 4.5v15l12-7.5z"/>
+          </svg>
+          <svg id="pause-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+            <path fill="currentColor" d="M6 5h4v14H6zM14 5h4v14h-4z"/>
+          </svg>
+        </button>
+        <button id="reset" type="button" aria-label="Сбросить симуляцию" title="Сбросить симуляцию" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4 11a8 8 0 1 1 2.2 6.5M4 5v6h6" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
       <div class="commands" aria-label="Файлы проекта">
         <button id="open" disabled>Открыть JSON</button>
