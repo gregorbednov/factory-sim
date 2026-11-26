@@ -24,7 +24,7 @@ pub fn product_picker(
     filtered_product_picker(ui, language, caption, id, products, none, |_| true)
 }
 
-fn filtered_product_picker(
+pub(super) fn filtered_product_picker(
     ui: &mut Ui,
     language: Language,
     caption: &str,
@@ -65,6 +65,7 @@ pub fn emission(
     language: Language,
     emission: &mut Option<Emission>,
     products: &BTreeMap<String, Product>,
+    include: impl Fn(&str) -> bool,
 ) -> bool {
     let mut mode = match emission {
         None => 0,
@@ -83,17 +84,22 @@ pub fn emission(
             }
         });
     if mode != previous {
+        let default_product = std::iter::once("box-carton")
+            .chain(BOXES.iter().map(|(id, _)| *id))
+            .chain(products.keys().map(String::as_str))
+            .find(|id| include(id))
+            .map(str::to_owned);
         *emission = match mode {
             1 => Some(Emission::Counts {
                 rows: vec![CountRow {
-                    product: Some("box-carton".into()),
+                    product: default_product,
                     count: 1,
                 }],
                 skip: None,
             }),
             2 => Some(Emission::Probability {
                 rows: vec![ProbabilityRow {
-                    product: Some("box-carton".into()),
+                    product: default_product,
                     probability: Probability::Fixed(1.0),
                 }],
             }),
@@ -118,13 +124,14 @@ pub fn emission(
             }
             for (index, row) in rows.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
-                    changed |= product_picker(
+                    changed |= filtered_product_picker(
                         ui,
                         language,
                         "Outcome",
                         &mut row.product,
                         products,
                         Some("Skip"),
+                        &include,
                     );
                     ui.horizontal(|ui| {
                         changed |= ui
@@ -155,13 +162,14 @@ pub fn emission(
             ui.label(language.text("Unassigned probability skips an emission."));
             for (index, row) in rows.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
-                    changed |= product_picker(
+                    changed |= filtered_product_picker(
                         ui,
                         language,
                         "Outcome",
                         &mut row.product,
                         products,
                         Some("Skip"),
+                        &include,
                     );
                     changed |= probability(ui, language, &mut row.probability);
                     if ui.small_button(language.text("Remove outcome")).clicked() {

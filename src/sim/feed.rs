@@ -13,7 +13,8 @@ pub(super) struct RandomFeed {
     frame: Isometry<Real>,
     belt_yaw: f32,
     deck: [f32; 3],
-    station: f32,
+    station: Option<[f32; 2]>,
+    half_opening: f32,
     interval: u64,
     next_tick: u64,
     rng: rand_chacha::ChaCha8Rng,
@@ -21,15 +22,14 @@ pub(super) struct RandomFeed {
 }
 
 impl RandomFeed {
-    pub(super) fn new(seed: u64, source: &Part, belt: &Part, interval: f32) -> Self {
+    pub(super) fn new(seed: u64, source: &Part, belt: &Part, interval: f32, width: f32) -> Self {
         let frame = pose(belt.position, belt.yaw);
         Self {
             frame,
             belt_yaw: belt.yaw,
             deck: belt.kind.feed_surface().unwrap(),
-            station: frame
-                .inverse_transform_point(&Point::from(source.position))
-                .x,
+            station: belt.feed_station(source.position),
+            half_opening: production::emitter_opening(width) * 0.5,
             interval: production::ticks(f64::from(interval)).unwrap(),
             next_tick: 0,
             rng: production::stream(seed, &source.id, 3),
@@ -38,6 +38,7 @@ impl RandomFeed {
     }
 
     fn placement(&mut self, sim: &Simulation, queued: &[Spawn]) -> Option<([f32; 3], f32)> {
+        let [along, across] = self.station?;
         let payload = self.pending.as_ref()?;
         let shape = sim.parcel_shape(payload.product.as_deref(), payload.size);
         let edge = 0.005;
@@ -48,14 +49,14 @@ impl RandomFeed {
             let bounds = shape.compute_aabb(&pose([0.0; 3], yaw));
             let x_min = -half_length - bounds.mins.x;
             let x_max = half_length - bounds.maxs.x;
-            let z_min = -half_width - bounds.mins.z;
-            let z_max = half_width - bounds.maxs.z;
-            if x_min > x_max || z_min > z_max {
+            let z_min = (-half_width).max(across - self.half_opening) - bounds.mins.z;
+            let z_max = half_width.min(across + self.half_opening) - bounds.maxs.z;
+            if !(x_min..=x_max).contains(&along) || z_min > z_max {
                 continue;
             }
 
             let local = Point::new(
-                self.station.clamp(x_min, x_max),
+                along,
                 self.deck[1] * 0.5 - bounds.mins.y + 0.015,
                 self.rng.gen_range(z_min..=z_max),
             );
@@ -98,6 +99,10 @@ impl Simulation {
         for (id, feed) in &mut feeds {
             if !flag(&self.tags, id, "enabled") {
                 self.publish(id, "spawn_blocked", Value::Bool(false));
+                continue;
+            }
+            if feed.station.is_none() {
+                self.publish(id, "spawn_blocked", Value::Bool(true));
                 continue;
             }
             if self.tick < feed.next_tick || self.parcels.len() + queued.len() >= MAX_PARCELS {
@@ -203,7 +208,7 @@ mod tests {
         let frame = pose(belt.position, belt.yaw);
         let source = &mut project.parts[1];
         source.position = frame
-            .transform_point(&Point::new(-2.7, 0.6, 0.4))
+            .transform_point(&Point::new(-2.7, 0.6, 0.0))
             .coords
             .into();
         if let PartKind::Emitter { interval, .. } = &mut source.kind {
@@ -227,7 +232,7 @@ mod tests {
                 .compute_aabb(&local);
             assert!((local.translation.x + 2.7).abs() < 0.001);
             assert!((local.rotation * Vector::y() - Vector::y()).norm() < 0.0001);
-            assert!(bounds.mins.z >= -0.496 && bounds.maxs.z <= 0.496);
+            assert!(bounds.mins.z >= -0.372 && bounds.maxs.z <= 0.372);
             assert!((bounds.mins.y - 0.125).abs() < 0.002);
             positions.push(local);
             sim.remove_parcel(&id);
@@ -243,6 +248,30 @@ mod tests {
             frame.inverse() * sim.world.bodies[body].position(),
             positions[0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn source_cannot_emit_on_a_remote_conveyor_or_shift_along_the_belt() -> Result<()> {
+        for position in [
+            [-12.0, 0.85, 0.0],
+            [-2.9, 0.85, 0.55],
+            [-2.9, 1.9, 0.0],
+            [-3.49, 0.85, 0.0],
+        ] {
+            let mut project = example();
+            project.parts[1].position = position;
+            let mut sim = Simulation::new(project)?;
+            for _ in 0..240 {
+                sim.step();
+            }
+            assert!(
+                sim.parcels.is_empty(),
+                "remote or shifted emission at {position:?}"
+            );
+            assert_eq!(count(&sim.tags, "source"), 0);
+            assert!(flag(&sim.tags, "source", "spawn_blocked"));
+        }
         Ok(())
     }
 

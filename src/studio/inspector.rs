@@ -39,12 +39,18 @@ pub(super) fn properties(
     let feed_belts: Vec<_> = project
         .parts
         .iter()
-        .filter(|part| part.kind.feed_surface().is_some())
+        .filter(|belt| belt.feed_station(part.position).is_some())
         .map(|part| (part.id.clone(), part.name.clone()))
         .collect();
     let unload_robot = project.parts.iter().any(|station| {
         matches!(&station.kind, PartKind::Machine { machine } if machine.unload_robot.as_deref() == Some(part.id.as_str()))
     });
+    let manufactured = |id: &str| {
+        project
+            .parts
+            .iter()
+            .any(|part| matches!(&part.kind, PartKind::Machine { machine } if machine.output == id))
+    };
     let mut changed = false;
     ui.label(
         RichText::new(language.text(part.kind.label()))
@@ -73,13 +79,15 @@ pub(super) fn properties(
             part.kind,
             PartKind::Emitter { emission: None, .. } | PartKind::Crate { .. }
         ) {
-            changed |= production_ui::product_picker(
+            let emitter = matches!(part.kind, PartKind::Emitter { .. });
+            changed |= production_ui::filtered_product_picker(
                 ui,
                 language,
                 "Product",
                 &mut part.product,
                 products,
                 Some("Manual box"),
+                |id| !emitter || !manufactured(id),
             );
         }
         match &mut part.kind {
@@ -118,12 +126,37 @@ pub(super) fn properties(
                     0.02..=1000.0,
                     0.05,
                 );
-                changed |= production_ui::emission(ui, language, emission, products);
+                changed |= production_ui::emission(ui, language, emission, products, |id| {
+                    !manufactured(id)
+                });
+                let emits_manufactured = emission.as_ref().map_or_else(
+                    || part.product.as_deref().is_some_and(manufactured),
+                    |recipe| recipe.products().any(manufactured),
+                );
+                if emits_manufactured {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        language
+                            .text("Choose a product without a production recipe for the emitter."),
+                    );
+                }
                 let before = random_spawn_belt.clone();
                 let belt_name = feed_belts
                     .iter()
                     .find_map(|(id, name)| (Some(id) == before.as_ref()).then_some(name.as_str()))
-                    .unwrap_or(language.text("Fixed position"));
+                    .unwrap_or_else(|| {
+                        language.text(if before.is_some() {
+                            "Conveyor outside the feed area"
+                        } else {
+                            "Fixed position"
+                        })
+                    });
+                if before.is_some() && !feed_belts.iter().any(|(id, _)| Some(id) == before.as_ref())
+                {
+                    ui.label(
+                        language.text("Place the emitter above its conveyor to resume feeding."),
+                    );
+                }
                 egui::ComboBox::from_label(language.text("Random spawn on conveyor"))
                     .selected_text(belt_name)
                     .show_ui(ui, |ui| {

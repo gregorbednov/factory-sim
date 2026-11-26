@@ -386,6 +386,7 @@ impl Simulation {
                 ref emission,
                 ref random_spawn_belt,
                 interval,
+                size,
                 ..
             } => {
                 if let Some(belt) = random_spawn_belt {
@@ -395,9 +396,20 @@ impl Simulation {
                         .iter()
                         .find(|part| &part.id == belt)
                         .unwrap();
+                    let width = part
+                        .product
+                        .as_deref()
+                        .and_then(|id| self.project.product(id))
+                        .map_or(size[2], |model| model.size[2]);
                     self.random_feeds.insert(
                         part.id.clone(),
-                        feed::RandomFeed::new(self.project.production.seed, part, belt, interval),
+                        feed::RandomFeed::new(
+                            self.project.production.seed,
+                            part,
+                            belt,
+                            interval,
+                            width,
+                        ),
                     );
                 }
                 if let Some(config) = emission {

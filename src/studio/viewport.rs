@@ -512,7 +512,7 @@ impl<'a> Scene<'a> {
             }
             PartKind::Emitter { size, .. } => {
                 let [_, height, width] = product.map_or(size, |(_, spec)| spec.size);
-                let span = width.max(0.55) * 1.35;
+                let span = crate::production::emitter_opening(width);
                 let clearance = height * 0.5 + 0.13;
                 for side in [-1.0, 1.0] {
                     let z = side * span * 0.5;

@@ -213,6 +213,13 @@ impl Language {
             "Inlet width (m)" => "Ширина входа (м)",
             "Outlet width (m)" => "Ширина выхода (м)",
             "Random spawn on conveyor" => "Случайная подача на конвейер",
+            "Conveyor outside the feed area" => "Конвейер вне зоны подачи",
+            "Choose a product without a production recipe for the emitter." => {
+                "Для источника выберите изделие без производственного рецепта в этом проекте."
+            }
+            "Place the emitter above its conveyor to resume feeding." => {
+                "Разместите источник над конвейером, чтобы возобновить подачу."
+            }
             "Fixed position" => "Фиксированное положение",
             "Spawn blocked" => "Подача заблокирована",
             "Length (m)" => "Длина (м)",
