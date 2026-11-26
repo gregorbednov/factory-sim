@@ -13,7 +13,7 @@ use super::{
 use crate::{
     product::{Mesh, ProductSpec},
     production::{Equipment, StaffRole},
-    project::{Part, PartKind, Project, Value},
+    project::{Part, PartKind, Pipe, Project, Value, WaterMeasurement, water_pipe_points},
     sim::Snapshot,
 };
 
@@ -37,6 +37,9 @@ const GUARD: Color32 = Color32::from_rgb(226, 176, 68);
 const DARK: Color32 = Color32::from_rgb(49, 59, 64);
 const ACTIVE: Color32 = Color32::from_rgb(109, 221, 189);
 const SELECT: Color32 = Color32::from_rgb(246, 190, 110);
+const WATER_PIPE: Color32 = Color32::from_rgb(75, 144, 222);
+const PIPE_DIAMETER_M: f32 = 0.065;
+const FLOW_MARKER: Color32 = Color32::from_rgb(133, 234, 250);
 
 pub struct Camera {
     yaw: f32,
@@ -226,6 +229,36 @@ impl<'a> Scene<'a> {
                     ));
                 return;
             }
+            if spec.liquid_capacity_l.is_some() {
+                let bottle = size.x < 0.1;
+                if bottle {
+                    self.cylinder(
+                        position - rotation * Vec3::Y * size.y * 0.1,
+                        size * Vec3::new(1.0, 0.8, 1.0),
+                        rotation,
+                        color,
+                        POLYMER,
+                        selected,
+                    );
+                } else {
+                    self.block(
+                        position - rotation * Vec3::Y * size.y * 0.09,
+                        size * Vec3::new(1.0, 0.82, 1.0),
+                        rotation,
+                        color,
+                        selected,
+                    );
+                }
+                self.cylinder(
+                    position + rotation * Vec3::Y * size.y * 0.39,
+                    size * Vec3::new(0.43, 0.22, 0.43),
+                    rotation,
+                    color,
+                    POLYMER,
+                    selected,
+                );
+                return;
+            }
             if !spec.cardboard {
                 self.block(
                     position - rotation * Vec3::Y * (size.y * 0.045),
@@ -279,6 +312,83 @@ impl<'a> Scene<'a> {
             Color32::from_rgb(231, 226, 214),
             false,
         );
+    }
+
+    fn water_ports(&mut self, part: &Part, highlight: bool) {
+        for outlet in [false, true] {
+            for index in 0..part.kind.water_port_count(outlet) {
+                let (at, outward) = part.water_port_at(outlet, index).unwrap();
+                self.cylinder(
+                    Vec3::from(at.map(|value| value as f32)),
+                    Vec3::new(0.105, 0.045, 0.105),
+                    Quat::from_rotation_arc(Vec3::Y, Vec3::from(outward.map(|value| value as f32))),
+                    if outlet { WATER_PIPE } else { STEEL },
+                    METAL,
+                    highlight,
+                );
+            }
+        }
+    }
+
+    fn water_pipe(&mut self, pipe: &Pipe, from: &Part, to: &Part, snapshot: &Snapshot) {
+        let Some(points) = water_pipe_points(from, pipe.from_port, to, pipe.to_port) else {
+            return;
+        };
+        let points = points.map(|point| Vec3::from(point.map(|value| value as f32)));
+        let length: f32 = points.windows(2).map(|leg| leg[0].distance(leg[1])).sum();
+        let volume_l = snapshot
+            .water_outlet_volume_l
+            .get(&(from.id.clone(), pipe.from_port))
+            .copied()
+            .unwrap_or(0.0);
+        let mut markers = PipeMarkers::new(
+            length,
+            PIPE_DIAMETER_M,
+            if from.kind.water_port_count(true) > 1 {
+                water_number(
+                    from,
+                    snapshot,
+                    if pipe.from_port == 0 {
+                        "outlet_1_l_s"
+                    } else {
+                        "outlet_2_l_s"
+                    },
+                )
+            } else {
+                water_flow(from, snapshot)
+            },
+            volume_l,
+        );
+        for leg in points.windows(2) {
+            let delta = leg[1] - leg[0];
+            let Some(direction) = delta.try_normalize() else {
+                continue;
+            };
+            let length = delta.length();
+            let angle = Quat::from_rotation_arc(Vec3::Y, direction);
+            self.cylinder(
+                (leg[0] + leg[1]) * 0.5,
+                Vec3::new(PIPE_DIAMETER_M, length + 0.01, PIPE_DIAMETER_M),
+                angle,
+                WATER_PIPE,
+                POLYMER,
+                false,
+            );
+            if let Some(markers) = &mut markers {
+                while markers.next_m < length {
+                    self.cylinder(
+                        leg[0] + direction * markers.next_m,
+                        markers.size,
+                        angle,
+                        FLOW_MARKER,
+                        POLYMER,
+                        false,
+                    );
+                    markers.next_m += markers.spacing_m;
+                }
+                markers.next_m -= length;
+            }
+        }
     }
 
     fn part(
@@ -1308,6 +1418,467 @@ impl<'a> Scene<'a> {
                     GUARD,
                 );
             }
+            PartKind::WaterSource {
+                size: [x, y, z], ..
+            } => {
+                cylinder_at(
+                    self,
+                    [0.0, -0.035 * y, 0.0],
+                    [0.94 * x, 0.86 * y, 0.94 * z],
+                    Quat::IDENTITY,
+                    WATER_PIPE,
+                    POLYMER,
+                );
+                cylinder_at(
+                    self,
+                    [0.0, 0.42 * y, 0.0],
+                    [x, 0.06 * y, z],
+                    Quat::IDENTITY,
+                    STEEL,
+                    METAL,
+                );
+                cylinder_at(
+                    self,
+                    [0.0, 0.475 * y, 0.0],
+                    [0.24 * x, 0.05 * y, 0.24 * z],
+                    Quat::IDENTITY,
+                    DARK,
+                    METAL,
+                );
+                box_at(self, [0.0, -0.48 * y, 0.0], [x, 0.04 * y, z], DARK);
+            }
+            PartKind::WaterPump {
+                size: [x, y, z], ..
+            } => {
+                box_at(self, [0.0, -0.43 * y, 0.0], [x, 0.14 * y, z], DARK);
+                cylinder_at(
+                    self,
+                    [-0.15 * x, 0.0, 0.0],
+                    [0.74 * z, 0.53 * x, 0.59 * y],
+                    along_x,
+                    DRIVE,
+                    METAL,
+                );
+                cylinder_at(
+                    self,
+                    [0.23 * x, 0.0, 0.0],
+                    [0.86 * z, 0.32 * x, 0.72 * y],
+                    along_x,
+                    GUARD,
+                    METAL,
+                );
+                box_at(
+                    self,
+                    [0.18 * x, 0.42 * y, 0.0],
+                    [0.21 * x, 0.16 * y, 0.25 * z],
+                    if snapshot
+                        .tags
+                        .get(&format!("{}.failed", part.id))
+                        .is_some_and(|state| state.value == Value::Bool(true))
+                    {
+                        Color32::from_rgb(221, 72, 48)
+                    } else if snapshot.running && water_flow(part, snapshot) > 0.0 {
+                        ACTIVE
+                    } else {
+                        DARK
+                    },
+                );
+            }
+            PartKind::WaterValve {
+                size: [x, y, z], ..
+            } => {
+                let opening = match snapshot
+                    .tags
+                    .get(&format!("{}.opening_pct", part.id))
+                    .map(|state| state.value)
+                {
+                    Some(Value::Float(opening)) => opening / 100.0,
+                    _ => 0.0,
+                };
+                let brass = Color32::from_rgb(184, 132, 58);
+                cylinder_at(
+                    self,
+                    [0.0, -0.08 * y, 0.0],
+                    [0.82 * z, 0.62 * x, 0.64 * y],
+                    along_x,
+                    brass,
+                    METAL,
+                );
+                for sign in [-1.0, 1.0] {
+                    cylinder_at(
+                        self,
+                        [sign * 0.36 * x, -0.08 * y, 0.0],
+                        [0.65 * z, 0.24 * x, 0.54 * y],
+                        along_x,
+                        STEEL,
+                        METAL,
+                    );
+                }
+                box_at(
+                    self,
+                    [0.0, 0.25 * y, 0.0],
+                    [0.30 * x, 0.23 * y, 0.33 * z],
+                    DARK,
+                );
+                self.block(
+                    center + rotation * Vec3::new(0.0, 0.435 * y, 0.0),
+                    Vec3::new(0.75 * x.min(z), 0.13 * y, 0.19 * z),
+                    rotation * Quat::from_rotation_y((1.0 - opening) * std::f32::consts::FRAC_PI_2),
+                    Color32::from_rgb(211, 75, 54),
+                    false,
+                );
+            }
+            PartKind::WaterDrain {
+                size: [x, y, z], ..
+            } => {
+                cylinder_at(
+                    self,
+                    [0.0, -0.10 * y, 0.0],
+                    [x, 0.80 * y, z],
+                    Quat::IDENTITY,
+                    STEEL,
+                    METAL,
+                );
+                cylinder_at(
+                    self,
+                    [0.0, 0.32 * y, 0.0],
+                    [0.78 * x, 0.10 * y, 0.78 * z],
+                    Quat::IDENTITY,
+                    DARK,
+                    POLYMER,
+                );
+            }
+            PartKind::WaterJunction {
+                size: [x, y, z],
+                mixing,
+            } => {
+                box_at(self, [0.0, 0.0, 0.0], [x, y * 0.63, z], WATER_PIPE);
+                box_at(
+                    self,
+                    [0.0, 0.37 * y, 0.0],
+                    [x * 0.63, y * 0.12, z * 0.72],
+                    if mixing { GUARD } else { STEEL },
+                );
+            }
+            PartKind::WaterInstrument {
+                size: [x, y, z],
+                measurement,
+            } => {
+                cylinder_at(
+                    self,
+                    [0.0, 0.0, 0.0],
+                    [z, x, y * 0.45],
+                    along_x,
+                    STEEL,
+                    METAL,
+                );
+                let dial = match measurement {
+                    WaterMeasurement::Flow => WATER_PIPE,
+                    WaterMeasurement::Temperature => GUARD,
+                    WaterMeasurement::Pressure => ACTIVE,
+                };
+                cylinder_at(
+                    self,
+                    [0.0, 0.28 * y, 0.0],
+                    [x * 0.67, y * 0.35, z * 0.8],
+                    Quat::IDENTITY,
+                    dial,
+                    METAL,
+                );
+            }
+            PartKind::WaterFilter {
+                size: [x, y, z], ..
+            } => {
+                cylinder_at(
+                    self,
+                    [0.0, 0.0, 0.0],
+                    [x * 0.8, y * 0.9, z],
+                    Quat::IDENTITY,
+                    DRIVE,
+                    METAL,
+                );
+                box_at(self, [0.0, 0.06 * y, 0.0], [x, y * 0.23, z], STEEL);
+                let loading = water_number(part, snapshot, "loading_pct");
+                box_at(
+                    self,
+                    [0.0, 0.27 * y, 0.51 * z],
+                    [x * 0.24, y * 0.13, z * 0.08],
+                    if loading > 90.0 { GUARD } else { ACTIVE },
+                );
+            }
+            PartKind::WaterHeater {
+                size: [x, y, z], ..
+            } => {
+                box_at(self, [0.0, 0.0, 0.0], [x, y, z], STEEL);
+                for across in [-0.24, 0.0, 0.24] {
+                    box_at(
+                        self,
+                        [across * x, 0.51 * y, 0.0],
+                        [x * 0.10, y * 0.08, z * 0.75],
+                        GUARD,
+                    );
+                }
+            }
+            PartKind::WaterHeatExchanger {
+                size: [x, y, z], ..
+            } => {
+                for left in [-0.34, -0.17, 0.0, 0.17, 0.34] {
+                    box_at(self, [x * left, 0.0, 0.0], [x * 0.12, y, z], STEEL);
+                }
+                box_at(self, [-0.46 * x, 0.0, 0.0], [x * 0.08, y * 0.86, z], DRIVE);
+                box_at(self, [0.46 * x, 0.0, 0.0], [x * 0.08, y * 0.86, z], DRIVE);
+            }
+            PartKind::WaterFiller {
+                size: [x, y, z], ..
+            } => {
+                box_at(self, [0.0, 0.25 * y, 0.0], [x, y * 0.35, z * 0.65], STEEL);
+                box_at(
+                    self,
+                    [0.0, -0.5 * y, -0.45 * z],
+                    [x * 0.2, y * 1.7, z * 0.13],
+                    DRIVE,
+                );
+                cylinder_at(
+                    self,
+                    [0.0, 0.04 * y, 0.0],
+                    [x * 0.23, y * 0.28, z * 0.23],
+                    Quat::IDENTITY,
+                    DARK,
+                    METAL,
+                );
+                if water_flow(part, snapshot) > 0.0 {
+                    cylinder_at(
+                        self,
+                        [0.0, -0.28 * y, 0.0],
+                        [0.014, 0.46 * y, 0.014],
+                        Quat::IDENTITY,
+                        FLOW_MARKER,
+                        POLYMER,
+                    );
+                }
+            }
+            PartKind::HeatedTank(tank) => {
+                let [x, y, z] = tank.size;
+                box_at(self, [0.0, -0.08 * y, 0.0], [x, 0.72 * y, z], STEEL);
+                box_at(
+                    self,
+                    [0.0, -0.47 * y, 0.0],
+                    [0.86 * x, 0.06 * y, 0.86 * z],
+                    DARK,
+                );
+                box_at(
+                    self,
+                    [0.0, 0.29 * y, 0.0],
+                    [0.98 * x, 0.06 * y, 0.98 * z],
+                    DARK,
+                );
+                box_at(
+                    self,
+                    [0.0, 0.41 * y, 0.0],
+                    [0.38 * x, 0.18 * y, 0.38 * z],
+                    STEEL,
+                );
+                self.block(
+                    center + rotation * Vec3::new(0.0, -0.05 * y, 0.505 * z),
+                    Vec3::new(0.18 * x, 0.40 * y, 0.015 * z),
+                    rotation,
+                    DARK,
+                    false,
+                );
+
+                let initial_level = tank.starting_volume_l() / tank.volume_l;
+                let level = if preview {
+                    initial_level
+                } else {
+                    match snapshot
+                        .tags
+                        .get(&format!("{}.level_pct", part.id))
+                        .map(|state| state.value)
+                    {
+                        Some(Value::Float(level)) => level / 100.0,
+                        _ => initial_level,
+                    }
+                }
+                .clamp(0.0, 1.0);
+                if level > 0.0 {
+                    let height = 0.36 * y * level;
+                    self.block(
+                        center + rotation * Vec3::new(0.0, -0.23 * y + height * 0.5, 0.518 * z),
+                        Vec3::new(0.135 * x, height, 0.015 * z),
+                        rotation,
+                        WATER_PIPE,
+                        false,
+                    );
+                }
+                if tank.networked {
+                    self.water_ports(part, highlight);
+                    return;
+                }
+
+                let feed_l_s = match snapshot
+                    .tags
+                    .get(&format!("{}.feed_l_s", part.id))
+                    .map(|state| state.value)
+                {
+                    Some(Value::Float(rate)) => rate,
+                    _ => 0.0,
+                };
+                let flowing = feed_l_s > 0.0;
+                let supply = Color32::from_rgb(75, 144, 222);
+                let drain = Color32::from_rgb(57, 174, 168);
+                let water = Color32::from_rgb(114, 204, 244);
+                let pipe = x.min(y).min(z) * 0.14;
+                let vertical = Quat::IDENTITY;
+
+                // Source reservoir and feed pump.
+                cylinder_at(
+                    self,
+                    [-2.50 * x, -0.12 * y, 0.0],
+                    [0.83 * x, 0.70 * y, 0.83 * z],
+                    vertical,
+                    supply,
+                    POLYMER,
+                );
+                cylinder_at(
+                    self,
+                    [-2.50 * x, 0.24 * y, 0.0],
+                    [0.87 * x, 0.04 * y, 0.87 * z],
+                    vertical,
+                    STEEL,
+                    METAL,
+                );
+                cylinder_at(
+                    self,
+                    [-2.50 * x, 0.28 * y, 0.0],
+                    [0.23 * x, 0.06 * y, 0.23 * z],
+                    vertical,
+                    DARK,
+                    METAL,
+                );
+                box_at(
+                    self,
+                    [-2.50 * x, -0.48 * y, 0.0],
+                    [0.90 * x, 0.04 * y, 0.90 * z],
+                    DARK,
+                );
+                box_at(
+                    self,
+                    [-1.61 * x, -0.465 * y, 0.0],
+                    [0.61 * x, 0.07 * y, 0.58 * z],
+                    DARK,
+                );
+                cylinder_at(
+                    self,
+                    [-1.70 * x, -0.30 * y, 0.0],
+                    [0.37 * z, 0.36 * x, 0.25 * y],
+                    along_x,
+                    DRIVE,
+                    METAL,
+                );
+                cylinder_at(
+                    self,
+                    [-1.46 * x, -0.30 * y, 0.0],
+                    [0.44 * z, 0.18 * x, 0.30 * y],
+                    along_x,
+                    GUARD,
+                    METAL,
+                );
+                box_at(
+                    self,
+                    [-1.55 * x, -0.13 * y, 0.0],
+                    [0.17 * x, 0.075 * y, 0.19 * z],
+                    if flowing { ACTIVE } else { DARK },
+                );
+
+                // Pipe up to the inlet, then overflow from the opposite side of the tank.
+                for (center, length, angle, color) in [
+                    ([-1.99 * x, -0.30 * y, 0.0], 0.38 * x, along_x, supply),
+                    ([-1.12 * x, -0.30 * y, 0.0], 0.56 * x, along_x, supply),
+                    (
+                        [-0.86 * x, -0.07 * y, 0.0],
+                        0.46 * y + pipe,
+                        vertical,
+                        supply,
+                    ),
+                    ([-0.67 * x, 0.16 * y, 0.0], 0.38 * x + pipe, along_x, supply),
+                    ([1.34 * x, 0.08 * y, 0.0], 1.70 * x + pipe, along_x, drain),
+                    (
+                        [2.19 * x, -0.055 * y, 0.0],
+                        0.27 * y + pipe,
+                        vertical,
+                        drain,
+                    ),
+                ] {
+                    cylinder_at(self, center, [pipe, length, pipe], angle, color, POLYMER);
+                }
+                for (offset, color) in [
+                    ([-0.51 * x, 0.16 * y, 0.0], supply),
+                    ([0.51 * x, 0.08 * y, 0.0], drain),
+                ] {
+                    cylinder_at(
+                        self,
+                        offset,
+                        [1.55 * pipe, 0.46 * pipe, 1.55 * pipe],
+                        along_x,
+                        color,
+                        METAL,
+                    );
+                }
+
+                // Open discharge into a floor drain.
+                cylinder_at(
+                    self,
+                    [2.19 * x, -0.455 * y, 0.0],
+                    [0.87 * x, 0.09 * y, 0.87 * z],
+                    vertical,
+                    STEEL,
+                    METAL,
+                );
+                cylinder_at(
+                    self,
+                    [2.19 * x, -0.404 * y, 0.0],
+                    [0.65 * x, 0.018 * y, 0.65 * z],
+                    vertical,
+                    DARK,
+                    POLYMER,
+                );
+                if flowing {
+                    let volume_l = snapshot
+                        .water_outlet_volume_l
+                        .get(&(part.id.clone(), 0))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let thickness = 0.48 * pipe;
+                    cylinder_at(
+                        self,
+                        [2.19 * x, -0.298 * y, 0.0],
+                        [thickness, 0.20 * y, thickness],
+                        vertical,
+                        water,
+                        POLYMER,
+                    );
+                    for (start, length, height) in [
+                        (-1.35 * x, 0.44 * x, -0.30 * y),
+                        (0.60 * x, 1.48 * x, 0.08 * y),
+                    ] {
+                        if let Some(mut markers) =
+                            PipeMarkers::new(length, pipe, feed_l_s, volume_l)
+                        {
+                            while markers.next_m < length {
+                                cylinder_at(
+                                    self,
+                                    [start + markers.next_m, height, 0.0],
+                                    markers.size.to_array(),
+                                    along_x,
+                                    FLOW_MARKER,
+                                    POLYMER,
+                                );
+                                markers.next_m += markers.spacing_m;
+                            }
+                        }
+                    }
+                }
+            }
             PartKind::Crate { size, .. } if preview => self.parcel(
                 center,
                 Vec3::from(product.map_or(size, |(_, spec)| spec.size)),
@@ -1317,6 +1888,50 @@ impl<'a> Scene<'a> {
             ),
             PartKind::Crate { .. } => {}
         }
+        self.water_ports(part, highlight);
+    }
+}
+
+struct PipeMarkers {
+    next_m: f32,
+    spacing_m: f32,
+    size: Vec3,
+}
+
+impl PipeMarkers {
+    fn new(length_m: f32, pipe_diameter_m: f32, rate_l_s: f32, volume_l: f64) -> Option<Self> {
+        if length_m <= 0.0 || rate_l_s <= 0.0 {
+            return None;
+        }
+        let spacing_m = (length_m / 12.0).max(0.32).min(length_m);
+        let area_m2 = std::f64::consts::PI * (f64::from(pipe_diameter_m) / 2.0).powi(2);
+        // Exaggerate motion by four for readability at the camera's default scale.
+        let travel_m = 4.0 * (volume_l * 0.001) / area_m2;
+        let next_m =
+            (travel_m + f64::from(spacing_m) / 2.0).rem_euclid(f64::from(spacing_m)) as f32;
+
+        let strength = (rate_l_s / (rate_l_s + 0.1)).sqrt();
+        let diameter = pipe_diameter_m * (1.1 + 0.4 * strength);
+        Some(Self {
+            next_m,
+            spacing_m,
+            size: Vec3::new(diameter, 0.02 + 0.045 * strength, diameter),
+        })
+    }
+}
+
+fn water_flow(part: &Part, snapshot: &Snapshot) -> f32 {
+    water_number(part, snapshot, "flow_l_s")
+}
+
+fn water_number(part: &Part, snapshot: &Snapshot, role: &str) -> f32 {
+    match snapshot
+        .tags
+        .get(&format!("{}.{}", part.id, role))
+        .map(|state| state.value)
+    {
+        Some(Value::Float(value)) => value,
+        _ => 0.0,
     }
 }
 
@@ -1576,6 +2191,21 @@ pub fn draw(
                 scene.part(project, part, snapshot, highlight, preview);
             }
         }
+        if !project.pipes.is_empty() {
+            let mut parts_by_id: BTreeMap<_, _> =
+                parts.iter().map(|part| (part.id.as_str(), part)).collect();
+            if let Some(part) = &moved_part {
+                parts_by_id.insert(part.id.as_str(), part);
+            }
+            for pipe in &project.pipes {
+                if let (Some(from), Some(to)) = (
+                    parts_by_id.get(pipe.from.as_str()),
+                    parts_by_id.get(pipe.to.as_str()),
+                ) {
+                    scene.water_pipe(pipe, from, to, snapshot);
+                }
+            }
+        }
         if !preview {
             for parcel in &snapshot.parcels {
                 if moving.is_some_and(|(id, _)| id == parcel.id) {
@@ -1591,6 +2221,23 @@ pub fn draw(
                         .and_then(|id| project.product(id).map(|spec| (id, spec))),
                     selection == Some(parcel.id.as_str()),
                 );
+                if let Some(contents) = parcel.liquid
+                    && contents.volume_l > 0.0
+                {
+                    let size = Vec3::from(parcel.size);
+                    let rotation = Quat::from_array(parcel.rotation);
+                    let height =
+                        size.y * 0.65 * (contents.volume_l / f64::from(contents.capacity_l)) as f32;
+                    scene.block(
+                        Vec3::from(parcel.position)
+                            + rotation
+                                * Vec3::new(0.0, -0.41 * size.y + height * 0.5, 0.51 * size.z),
+                        Vec3::new(0.20 * size.x, height, 0.012 * size.z),
+                        rotation,
+                        WATER_PIPE,
+                        false,
+                    );
+                }
                 if parcel.scrap {
                     let rotation = Quat::from_array(parcel.rotation);
                     let size = Vec3::from(parcel.size);
@@ -1708,4 +2355,21 @@ fn flag(snapshot: &Snapshot, id: &str, role: &str) -> bool {
         .tags
         .get(&format!("{id}.{role}"))
         .is_some_and(|tag| tag.value == Value::Bool(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_markers_vary_size_and_travel_with_discharge() {
+        assert!(PipeMarkers::new(1.0, PIPE_DIAMETER_M, 0.0, 0.0).is_none());
+        let start = PipeMarkers::new(1.0, PIPE_DIAMETER_M, 0.00015, 0.0).unwrap();
+        let slow = PipeMarkers::new(1.0, PIPE_DIAMETER_M, 0.00015, 0.000075).unwrap();
+        let fast = PipeMarkers::new(1.0, PIPE_DIAMETER_M, 0.15, 0.075).unwrap();
+
+        assert!(fast.size.x > slow.size.x && fast.size.y > slow.size.y);
+        let slow_travel = slow.next_m - start.next_m;
+        assert!(slow_travel > 0.0 && (fast.next_m - start.next_m) > 900.0 * slow_travel);
+    }
 }

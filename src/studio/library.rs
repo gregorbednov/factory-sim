@@ -6,7 +6,10 @@ use super::{i18n::Language, viewport};
 use crate::{
     product::{BOXES, ProductSpec},
     production::{AssemblyMode, Equipment, Machine, Robot, RobotStep, Staff, StaffRole},
-    project::{Part, PartKind, Project},
+    project::{
+        HeatedTank, Part, PartKind, Project, default_drain_flow, default_open_valve_resistance,
+        default_pump_head,
+    },
     sim::Snapshot,
 };
 
@@ -15,6 +18,71 @@ pub(super) fn presets() -> impl Iterator<Item = PartKind> {
         .into_iter()
         .chain(equipment_palette())
         .chain(station_palette())
+        .chain([
+            PartKind::WaterSource {
+                size: [0.5, 0.9, 0.5],
+                temperature_c: 15.0,
+                max_flow_l_s: 0.03,
+                dirt_mg_l: 0.0,
+            },
+            PartKind::WaterPump {
+                size: [0.42, 0.32, 0.32],
+                max_flow_l_s: 0.03,
+                shutoff_head_m: default_pump_head(),
+                dirt_limit_mg: crate::project::default_pump_dirt_limit(),
+            },
+            PartKind::HeatedTank(HeatedTank::default()),
+            PartKind::WaterValve {
+                size: [0.3, 0.25, 0.23],
+                max_flow_l_s: 0.25,
+                open_resistance: default_open_valve_resistance(),
+            },
+            PartKind::WaterDrain {
+                size: [0.42, 0.13, 0.42],
+                max_flow_l_s: default_drain_flow(),
+            },
+            PartKind::WaterJunction {
+                size: [0.3, 0.22, 0.33],
+                mixing: false,
+            },
+            PartKind::WaterJunction {
+                size: [0.3, 0.22, 0.33],
+                mixing: true,
+            },
+            PartKind::WaterInstrument {
+                size: [0.25, 0.25, 0.18],
+                measurement: crate::project::WaterMeasurement::Flow,
+            },
+            PartKind::WaterInstrument {
+                size: [0.25, 0.25, 0.18],
+                measurement: crate::project::WaterMeasurement::Temperature,
+            },
+            PartKind::WaterInstrument {
+                size: [0.25, 0.25, 0.18],
+                measurement: crate::project::WaterMeasurement::Pressure,
+            },
+            PartKind::WaterFilter {
+                size: [0.35, 0.40, 0.28],
+                clean_resistance: 3.0,
+                dirty_resistance: 32.0,
+                capacity_mg: 4000.0,
+                efficiency_pct: 98.0,
+            },
+            PartKind::WaterHeater {
+                size: [0.42, 0.30, 0.34],
+                max_power_w: 3000.0,
+            },
+            PartKind::WaterHeatExchanger {
+                size: [0.50, 0.42, 0.48],
+                conductance_w_k: 1000.0,
+                resistance: 8.0,
+            },
+            PartKind::WaterFiller {
+                size: [0.35, 0.40, 0.40],
+                max_flow_l_s: 0.15,
+                dose_l: 0.45,
+            },
+        ])
 }
 
 pub(super) fn placement_height(kind: &PartKind, spec: Option<ProductSpec<'_>>) -> f32 {
@@ -26,6 +94,8 @@ pub(super) fn placement_height(kind: &PartKind, spec: Option<ProductSpec<'_>>) -
                 ..
             } => size[1] * 0.5,
             PartKind::Staff { .. } | PartKind::Robot { .. } => 0.0,
+            PartKind::WaterFiller { size, .. } => size[1] + 0.25,
+            _ if kind.water_size().is_some() => kind.water_size().unwrap()[1] * 0.5,
             PartKind::FlowGuide { height, .. } => 0.71 + height * 0.5,
             _ => 0.6,
         },
@@ -131,16 +201,18 @@ enum Category {
     Flow,
     Guards,
     Stations,
+    Water,
     Products,
 }
 
 impl Category {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Transport,
         Self::Sensors,
         Self::Flow,
         Self::Guards,
         Self::Stations,
+        Self::Water,
         Self::Products,
     ];
 
@@ -151,6 +223,7 @@ impl Category {
             Self::Flow => "Infeed and outfeed",
             Self::Guards => "Guards",
             Self::Stations => "Stations and staff",
+            Self::Water => "Water circuit",
             Self::Products => "Products",
         }
     }
@@ -179,6 +252,17 @@ impl Category {
             PartKind::Machine { .. } | PartKind::Robot { .. } | PartKind::Staff { .. } => {
                 Self::Stations
             }
+            PartKind::HeatedTank(_)
+            | PartKind::WaterSource { .. }
+            | PartKind::WaterPump { .. }
+            | PartKind::WaterValve { .. }
+            | PartKind::WaterDrain { .. }
+            | PartKind::WaterJunction { .. }
+            | PartKind::WaterInstrument { .. }
+            | PartKind::WaterFilter { .. }
+            | PartKind::WaterHeater { .. }
+            | PartKind::WaterHeatExchanger { .. }
+            | PartKind::WaterFiller { .. } => Self::Water,
             PartKind::Crate { .. } => Self::Products,
         }
     }

@@ -1,0 +1,5 @@
+[
+  {"tick": 0, "tag": "tank.heater_pct", "value": 50.0},
+  {"tick": 120, "tag": "tank.mixer_on", "value": true},
+  {"tick": 3600, "tag": "pump.target_l_s", "value": 0.2}
+]

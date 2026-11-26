@@ -969,7 +969,11 @@ impl Simulation {
         let item = self.parcels.get_mut(id).unwrap();
         let collider = &mut self.world.colliders[item.collider];
         collider.set_shape(shape);
-        collider.set_mass(spec.mass);
+        if item.product.as_deref() != Some(product) {
+            item.liquid = spec.liquid_capacity_l.map(super::filling::Contents::new);
+        }
+        item.dry_mass = spec.mass;
+        collider.set_mass(spec.mass + item.liquid.map_or(0.0, |liquid| liquid.volume_l as f32));
         item.size = size;
         item.product = Some(product.to_owned());
         item.scrap = scrap;

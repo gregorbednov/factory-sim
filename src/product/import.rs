@@ -85,6 +85,7 @@ pub fn import(path: &Path, meters_per_unit: f64, up: UpAxis, mass: f32) -> Resul
             .into(),
         size,
         mass,
+        liquid_capacity_l: None,
         geometry,
         mesh: Arc::new(mesh),
     };

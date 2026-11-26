@@ -1,5 +1,10 @@
 mod cell;
 mod feed;
+mod filling;
+mod fluid;
+#[cfg(test)]
+mod process_tests;
+mod thermal;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -15,6 +20,7 @@ use crate::{
     project::{Direction, Part, PartKind, Project, Tag, Value},
 };
 
+// Current fixed simulation tick rate. Display refresh and PLC polling are independent.
 pub const HZ: u32 = 120;
 pub const DT: f32 = 1.0 / HZ as f32;
 const MAX_PARCELS: usize = 512;
@@ -44,6 +50,8 @@ pub struct ParcelPose {
     pub product: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub scrap: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquid: Option<filling::Contents>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,6 +67,9 @@ pub struct Snapshot {
     #[cfg(any(feature = "studio", feature = "web"))]
     #[serde(skip)]
     pub belt_travel: BTreeMap<String, f32>,
+    #[cfg(any(feature = "studio", feature = "web"))]
+    #[serde(skip)]
+    pub water_outlet_volume_l: BTreeMap<(String, u8), f64>,
     #[cfg(any(feature = "studio", feature = "web"))]
     #[serde(skip)]
     pub machine_grips: BTreeMap<String, [f32; 3]>,
@@ -85,6 +96,8 @@ struct Parcel {
     collider: ColliderHandle,
     size: [f32; 3],
     product: Option<String>,
+    liquid: Option<filling::Contents>,
+    dry_mass: f32,
     owner: Option<String>,
     scrap: bool,
 }
@@ -137,6 +150,10 @@ pub struct Simulation {
     recipes: BTreeMap<String, RecipeRuntime>,
     random_feeds: BTreeMap<String, feed::RandomFeed>,
     cells: cell::Cells,
+    heated_tanks: BTreeMap<String, thermal::Tank>,
+    water: fluid::Network,
+    #[cfg(any(feature = "studio", feature = "web"))]
+    water_outlet_volume_l: BTreeMap<(String, u8), f64>,
     cell_parts: Arc<[Part]>,
     serial: u64,
     initial: BTreeMap<String, Value>,
@@ -275,6 +292,9 @@ impl Simulation {
             .collect();
         cell_parts.sort_by(|a, b| a.id.cmp(&b.id));
         let mut simulation = Self {
+            water: fluid::Network::new(&project),
+            #[cfg(any(feature = "studio", feature = "web"))]
+            water_outlet_volume_l: BTreeMap::new(),
             project,
             running: false,
             tick: 0,
@@ -291,6 +311,7 @@ impl Simulation {
             recipes: BTreeMap::new(),
             random_feeds: BTreeMap::new(),
             cells: cell::Cells::default(),
+            heated_tanks: BTreeMap::new(),
             cell_parts: cell_parts.into(),
             serial: 0,
             initial,
@@ -298,6 +319,7 @@ impl Simulation {
         for part in simulation.project.parts.clone() {
             simulation.insert_part(&part);
         }
+        simulation.refresh_water_sensors();
         if !simulation.random_feeds.is_empty() {
             simulation.world.queries.update(&simulation.world.colliders);
         }
@@ -325,7 +347,23 @@ impl Simulation {
                     },
                 );
             }
-            PartKind::Barrier { size } => {
+            PartKind::HeatedTank(config) => {
+                self.world
+                    .colliders
+                    .insert(cuboid(config.size).position(isometry));
+                self.heated_tanks
+                    .insert(part.id.clone(), thermal::Tank::new(config));
+            }
+            PartKind::Barrier { size }
+            | PartKind::WaterSource { size, .. }
+            | PartKind::WaterPump { size, .. }
+            | PartKind::WaterValve { size, .. }
+            | PartKind::WaterDrain { size, .. }
+            | PartKind::WaterJunction { size, .. }
+            | PartKind::WaterFilter { size, .. }
+            | PartKind::WaterInstrument { size, .. }
+            | PartKind::WaterHeater { size, .. }
+            | PartKind::WaterHeatExchanger { size, .. } => {
                 self.world.colliders.insert(cuboid(size).position(isometry));
             }
             PartKind::FlowGuide {
@@ -425,7 +463,7 @@ impl Simulation {
             | PartKind::Machine { .. }
             | PartKind::Robot { .. }
             | PartKind::Staff { .. } => self.cell_insert(part),
-            PartKind::Sensor { .. } | PartKind::Remover { .. } => {}
+            PartKind::Sensor { .. } | PartKind::Remover { .. } | PartKind::WaterFiller { .. } => {}
         }
     }
 
@@ -440,6 +478,9 @@ impl Simulation {
     ) {
         let spec = product.as_deref().and_then(|id| self.project.product(id));
         let (size, mass) = spec.map_or((size, mass), |spec| (spec.size, spec.mass));
+        let liquid = spec
+            .and_then(|spec| spec.liquid_capacity_l)
+            .map(filling::Contents::new);
         let collider = ColliderBuilder::new(self.parcel_shape(product.as_deref(), size));
         let body = self.world.bodies.insert(
             RigidBodyBuilder::dynamic()
@@ -458,6 +499,8 @@ impl Simulation {
                 collider,
                 size,
                 product,
+                liquid,
+                dry_mass: mass,
                 owner: None,
                 scrap: false,
             },
@@ -535,6 +578,7 @@ impl Simulation {
             self.cell_tick();
         }
         let mut sensors = Vec::new();
+        self.step_heated_tanks(1.0 / f64::from(HZ), &mut sensors);
         let mut to_spawn = Vec::new();
         let mut moving_changed = false;
         for part in &self.project.parts {
@@ -780,6 +824,213 @@ impl Simulation {
         }
     }
 
+    fn refresh_water_sensors(&mut self) {
+        let mut sensors = Vec::new();
+        self.step_heated_tanks(0.0, &mut sensors);
+        for (id, value) in sensors {
+            self.tags.get_mut(&id).unwrap().value = value;
+        }
+    }
+
+    #[cfg(feature = "studio")]
+    pub fn set_pipes(&mut self, pipes: Vec<crate::project::Pipe>) -> Result<()> {
+        ensure!(!self.running, "pause the simulation before changing pipes");
+        let mut project = self.project.clone();
+        project.pipes = pipes;
+        project.validate()?;
+        self.water.reconnect(&project);
+        self.project = project;
+        self.refresh_water_sensors();
+        Ok(())
+    }
+
+    fn step_heated_tanks(&mut self, dt: f64, sensors: &mut Vec<(String, Value)>) {
+        let filler_batches = self.filler_batches(dt);
+        let flows = self.water.solve(
+            dt,
+            |id, role| {
+                self.tags
+                    .get(&tag_id(id, role))
+                    .map_or(0.0, |tag| match tag.value {
+                        Value::Float(value) => f64::from(value),
+                        Value::Bool(value) => f64::from(u8::from(value)),
+                        Value::Int(value) => f64::from(value),
+                    })
+            },
+            |id| self.heated_tanks[id].storage(),
+            |id| filler_batches.get(id).map_or(0.0, |batch| batch.limit_l_s),
+        );
+        for part in &self.project.parts {
+            let id = &part.id;
+            let outlets = part.kind.water_port_count(true);
+            if outlets == 0 && !part.kind.has_water_inlet() {
+                continue;
+            }
+            let ports = flows.get(id.as_str()).copied().unwrap_or_default();
+            let mut stream = if outlets > 0 {
+                ports.outlet
+            } else {
+                ports.inlet
+            };
+            match part.kind {
+                PartKind::WaterSource {
+                    temperature_c,
+                    dirt_mg_l,
+                    ..
+                } => {
+                    stream.temperature_c = f64::from(temperature_c);
+                    stream.dirt_mg_l = f64::from(dirt_mg_l);
+                }
+                PartKind::WaterJunction { .. } => stream.mix(ports.second_outlet),
+                _ => {}
+            }
+            #[cfg(any(feature = "studio", feature = "web"))]
+            if dt > 0.0 {
+                for (port, flow) in [(0, ports.outlet), (1, ports.second_outlet)] {
+                    if flow.rate_l_s > 0.0 {
+                        *self
+                            .water_outlet_volume_l
+                            .entry((id.clone(), port))
+                            .or_default() += flow.rate_l_s * dt;
+                    }
+                }
+            }
+            sensors.extend([
+                (tag_id(id, "flow_l_s"), Value::Float(stream.rate_l_s as f32)),
+                (
+                    tag_id(id, "dirt_mg_l"),
+                    Value::Float(stream.dirt_mg_l as f32),
+                ),
+                (
+                    tag_id(id, "liquid_temp_c"),
+                    Value::Float(stream.temperature_c as f32),
+                ),
+            ]);
+            if outlets == 2 {
+                sensors.extend([
+                    (
+                        tag_id(id, "outlet_1_l_s"),
+                        Value::Float(ports.outlet.rate_l_s as f32),
+                    ),
+                    (
+                        tag_id(id, "outlet_2_l_s"),
+                        Value::Float(ports.second_outlet.rate_l_s as f32),
+                    ),
+                ]);
+            }
+            match part.kind {
+                PartKind::WaterPump { dirt_limit_mg, .. } => {
+                    let (load, failures) = self.water.service_values(id);
+                    let wear = load / f64::from(dirt_limit_mg);
+                    sensors.extend([
+                        (tag_id(id, "wear_pct"), Value::Float((wear * 100.0) as f32)),
+                        (tag_id(id, "failed"), Value::Bool(wear >= 1.0)),
+                        (tag_id(id, "failures"), Value::Int(failures)),
+                    ]);
+                }
+                PartKind::WaterFilter { capacity_mg, .. } => {
+                    let loading = self.water.service_values(id).0 / f64::from(capacity_mg);
+                    sensors.extend([
+                        (
+                            tag_id(id, "loading_pct"),
+                            Value::Float((loading * 100.0) as f32),
+                        ),
+                        (
+                            tag_id(id, "pressure_drop_kpa"),
+                            Value::Float(ports.pressure_drop_kpa as f32),
+                        ),
+                        (
+                            tag_id(id, "inlet_dirt_mg_l"),
+                            Value::Float(ports.inlet.dirt_mg_l as f32),
+                        ),
+                    ]);
+                }
+                PartKind::WaterInstrument {
+                    measurement: crate::project::WaterMeasurement::Temperature,
+                    ..
+                } => sensors.push((
+                    tag_id(id, "temperature_c"),
+                    Value::Float(ports.inlet.temperature_c as f32),
+                )),
+                PartKind::WaterInstrument {
+                    measurement: crate::project::WaterMeasurement::Pressure,
+                    ..
+                } => sensors.push((
+                    tag_id(id, "pressure_kpa"),
+                    Value::Float(ports.pressure_kpa as f32),
+                )),
+                PartKind::WaterHeater { .. } => {
+                    sensors.push((tag_id(id, "power_w"), Value::Float(ports.power_w as f32)))
+                }
+                PartKind::WaterHeatExchanger { .. } => sensors.extend([
+                    (tag_id(id, "heat_w"), Value::Float(ports.power_w as f32)),
+                    (
+                        tag_id(id, "outlet_2_temperature_c"),
+                        Value::Float(ports.second_outlet.temperature_c as f32),
+                    ),
+                    (
+                        tag_id(id, "outlet_2_dirt_mg_l"),
+                        Value::Float(ports.second_outlet.dirt_mg_l as f32),
+                    ),
+                ]),
+                _ => {}
+            }
+        }
+        self.apply_filling(filler_batches, &flows, dt, sensors);
+        for (id, tank) in &mut self.heated_tanks {
+            let (inlet, outflow_l_s) = if tank.config.networked {
+                let ports = flows.get(id.as_str()).copied().unwrap_or_default();
+                sensors.extend([
+                    (
+                        tag_id(id, "inflow_l_s"),
+                        Value::Float(ports.inlet.rate_l_s as f32),
+                    ),
+                    (
+                        tag_id(id, "outflow_l_s"),
+                        Value::Float(ports.outlet.rate_l_s as f32),
+                    ),
+                ]);
+                (ports.inlet, ports.outlet.rate_l_s)
+            } else {
+                let rate_l_s = f64::from(number(&self.tags, id, "feed_l_s"));
+                #[cfg(any(feature = "studio", feature = "web"))]
+                if dt > 0.0 && rate_l_s > 0.0 {
+                    *self
+                        .water_outlet_volume_l
+                        .entry((id.clone(), 0))
+                        .or_default() += rate_l_s * dt;
+                }
+                (
+                    fluid::Flow {
+                        rate_l_s,
+                        temperature_c: f64::from(tank.config.feed_temperature_c),
+                        dirt_mg_l: 0.0,
+                    },
+                    rate_l_s,
+                )
+            };
+            let output = tank.step(
+                dt,
+                flag(&self.tags, id, "mixer_on"),
+                number(&self.tags, id, "heater_pct"),
+                inlet,
+                outflow_l_s,
+            );
+            sensors.extend([
+                (
+                    tag_id(id, "temperature_c"),
+                    Value::Float(output.temperature_c),
+                ),
+                (tag_id(id, "heater_actual_w"), Value::Float(output.heater_w)),
+                (tag_id(id, "level_pct"), Value::Float(output.level_pct)),
+                (
+                    tag_id(id, "heater_blocked"),
+                    Value::Bool(output.heater_blocked),
+                ),
+            ]);
+        }
+    }
+
     fn remove_parcel(&mut self, id: &str) {
         let parcel = self.parcels.remove(id).unwrap();
         self.parcel_colliders.remove(&parcel.collider);
@@ -818,10 +1069,13 @@ impl Simulation {
                         size: parcel.size,
                         product: parcel.product.clone(),
                         scrap: parcel.scrap,
+                        liquid: parcel.liquid,
                     }
                 })
                 .collect(),
             drivers: self.drivers.clone(),
+            #[cfg(any(feature = "studio", feature = "web"))]
+            water_outlet_volume_l: self.water_outlet_volume_l.clone(),
             #[cfg(any(feature = "studio", feature = "web"))]
             machine_grips: self.machine_grips(),
             #[cfg(any(feature = "studio", feature = "web"))]
@@ -876,6 +1130,394 @@ fn count(tags: &BTreeMap<String, TagState>, id: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tank_project() -> Result<Project> {
+        // Keep the regression topology independent of projects edited in Studio.
+        Ok(serde_json::from_str(
+            r#"{
+                "version": 1,
+                "name": "Water circuit regression",
+                "parts": [
+                    {
+                        "id": "tank", "name": "Tank", "kind": "heated_tank",
+                        "position": [0.0, 0.6, 0.0], "size": [0.6, 1.2, 0.6],
+                        "volume_l": 40.0, "initial_volume_l": 20.0,
+                        "initial_temperature_c": 20.0, "ambient_temperature_c": 20.0,
+                        "heat_loss_w_per_k": 8.0, "heater_max_w": 2000.0, "networked": true
+                    },
+                    {
+                        "id": "source", "name": "Source", "kind": "water_source",
+                        "position": [-2.0, 0.45, 0.0], "size": [0.5, 0.9, 0.5],
+                        "temperature_c": 15.0, "max_flow_l_s": 0.25
+                    },
+                    {
+                        "id": "pump", "name": "Pump", "kind": "water_pump",
+                        "position": [-1.0, 0.16, 0.0], "size": [0.42, 0.32, 0.32],
+                        "max_flow_l_s": 0.3
+                    },
+                    {
+                        "id": "valve", "name": "Outlet valve", "kind": "water_valve",
+                        "position": [0.95, 0.22, 0.0], "size": [0.3, 0.25, 0.23],
+                        "max_flow_l_s": 0.25
+                    },
+                    {
+                        "id": "drain", "name": "Drain", "kind": "water_drain",
+                        "position": [1.65, 0.065, 0.0], "size": [0.42, 0.13, 0.42],
+                        "max_flow_l_s": 0.25
+                    }
+                ],
+                "pipes": [
+                    {"from": "source", "to": "pump"},
+                    {"from": "pump", "to": "tank"},
+                    {"from": "tank", "to": "valve"},
+                    {"from": "valve", "to": "drain"}
+                ],
+                "initial_commands": {"pump.target_l_s": 0.0, "valve.opening_pct": 40.0}
+            }"#,
+        )?)
+    }
+
+    #[test]
+    fn tank_applies_commands_and_publishes_sensors() -> Result<()> {
+        let mut project = tank_project()?;
+        project.pipes.retain(|pipe| pipe.to != "drain");
+        if let PartKind::HeatedTank(tank) = &mut project.parts[0].kind {
+            tank.initial_volume_l = Some(tank.volume_l);
+        }
+        let serialized = serde_json::to_string(&project)?;
+        let mut simulation = Simulation::new(serde_json::from_str(&serialized)?)?;
+        assert_eq!(number(&simulation.tags, "tank", "temperature_c"), 20.0);
+        assert!(
+            simulation
+                .command("tank.temperature_c", Value::Float(25.0))
+                .is_err()
+        );
+
+        simulation.command("tank.heater_pct", Value::Float(100.0))?;
+        simulation.step();
+        assert!(flag(&simulation.tags, "tank", "heater_blocked"));
+        assert_eq!(number(&simulation.tags, "tank", "heater_actual_w"), 0.0);
+        assert_eq!(number(&simulation.tags, "tank", "temperature_c"), 20.0);
+
+        simulation.command("tank.mixer_on", Value::Bool(true))?;
+        for _ in 0..HZ * 60 {
+            simulation.step();
+        }
+        assert!(!flag(&simulation.tags, "tank", "heater_blocked"));
+        assert_eq!(number(&simulation.tags, "tank", "heater_actual_w"), 2000.0);
+        assert!((number(&simulation.tags, "tank", "temperature_c") - 20.71667).abs() < 0.00001);
+
+        #[cfg(any(feature = "mcp", feature = "studio"))]
+        {
+            simulation.reset()?;
+            let snapshot = simulation.snapshot();
+            assert_eq!(snapshot.tick, 0);
+            assert_eq!(number(&snapshot.tags, "tank", "temperature_c"), 20.0);
+            assert_eq!(number(&snapshot.tags, "tank", "heater_pct"), 0.0);
+            assert_eq!(number(&snapshot.tags, "tank", "heater_actual_w"), 0.0);
+            assert!(!flag(&snapshot.tags, "tank", "mixer_on"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tank_accumulates_the_difference_between_inlet_and_outlet() -> Result<()> {
+        let project = tank_project()?;
+        let mut simulation = Simulation::new(project)?;
+        simulation.command("pump.target_l_s", Value::Float(0.3))?;
+        let mut stored_l = 20.0;
+        for _ in 0..HZ * 60 {
+            simulation.step();
+            let inlet = number(&simulation.tags, "tank", "inflow_l_s");
+            let outlet = number(&simulation.tags, "tank", "outflow_l_s");
+            assert!(inlet > outlet && outlet > 0.0);
+            assert_eq!(number(&simulation.tags, "source", "flow_l_s"), inlet);
+            assert_eq!(number(&simulation.tags, "pump", "flow_l_s"), inlet);
+            assert_eq!(number(&simulation.tags, "drain", "flow_l_s"), outlet);
+            stored_l += (f64::from(inlet) - f64::from(outlet)) / f64::from(HZ);
+        }
+        let level = f64::from(number(&simulation.tags, "tank", "level_pct"));
+        assert!((level - stored_l / 40.0 * 100.0).abs() < 0.0001);
+        assert!(number(&simulation.tags, "tank", "temperature_c") < 20.0);
+        Ok(())
+    }
+
+    #[test]
+    fn tank_fills_without_a_drain_and_refuses_water_when_full() -> Result<()> {
+        let mut project = tank_project()?;
+        project.pipes.retain(|pipe| pipe.to != "drain");
+        let PartKind::HeatedTank(tank) = &mut project.parts[0].kind else {
+            unreachable!("tank example");
+        };
+        tank.volume_l = 1.0;
+        tank.initial_volume_l = Some(0.9);
+        let mut simulation = Simulation::new(project)?;
+        simulation.command("pump.target_l_s", Value::Float(0.25))?;
+        simulation.step();
+        assert!(number(&simulation.tags, "tank", "inflow_l_s") > 0.0);
+        assert_eq!(number(&simulation.tags, "tank", "outflow_l_s"), 0.0);
+        for _ in 0..HZ {
+            simulation.step();
+        }
+        assert_eq!(number(&simulation.tags, "tank", "level_pct"), 100.0);
+        assert_eq!(number(&simulation.tags, "pump", "flow_l_s"), 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn tank_can_drain_with_no_supply_and_blocks_dry_heating() -> Result<()> {
+        let mut project = tank_project()?;
+        project
+            .pipes
+            .retain(|pipe| pipe.from == "tank" || pipe.from == "valve");
+        let PartKind::HeatedTank(tank) = &mut project.parts[0].kind else {
+            unreachable!("tank example");
+        };
+        tank.volume_l = 1.0;
+        tank.initial_volume_l = Some(0.05);
+        let mut simulation = Simulation::new(project)?;
+        simulation.command("tank.mixer_on", Value::Bool(true))?;
+        simulation.command("tank.heater_pct", Value::Float(50.0))?;
+        simulation.step();
+        assert!(number(&simulation.tags, "drain", "flow_l_s") > 0.0);
+        assert_eq!(number(&simulation.tags, "tank", "heater_actual_w"), 1000.0);
+        for _ in 0..HZ * 12 {
+            simulation.step();
+        }
+        assert_eq!(number(&simulation.tags, "tank", "level_pct"), 0.0);
+        assert_eq!(number(&simulation.tags, "drain", "flow_l_s"), 0.0);
+        assert_eq!(number(&simulation.tags, "tank", "heater_actual_w"), 0.0);
+        assert!(flag(&simulation.tags, "tank", "heater_blocked"));
+        Ok(())
+    }
+
+    #[test]
+    fn valve_adjusts_discharge_while_the_inlet_keeps_running() -> Result<()> {
+        let mut simulation = Simulation::new(tank_project()?)?;
+        simulation.command("pump.target_l_s", Value::Float(0.125))?;
+        simulation.command("valve.opening_pct", Value::Float(0.0))?;
+        simulation.step();
+        let level = number(&simulation.tags, "tank", "level_pct");
+        assert!(level > 50.0);
+        assert!(number(&simulation.tags, "tank", "inflow_l_s") > 0.0);
+        assert_eq!(number(&simulation.tags, "valve", "flow_l_s"), 0.0);
+
+        simulation.command("valve.opening_pct", Value::Float(50.0))?;
+        for _ in 0..HZ {
+            simulation.step();
+        }
+        let partial = number(&simulation.tags, "valve", "flow_l_s");
+        assert!(partial > 0.0);
+        let level = number(&simulation.tags, "tank", "level_pct");
+
+        simulation.command("valve.opening_pct", Value::Float(150.0))?;
+        simulation.step();
+        assert_eq!(number(&simulation.tags, "valve", "opening_pct"), 100.0);
+        assert!(number(&simulation.tags, "drain", "flow_l_s") > partial);
+        assert!(number(&simulation.tags, "tank", "level_pct") < level);
+        Ok(())
+    }
+
+    #[test]
+    fn inlet_valve_meters_supply_independently_of_the_outlet_valve() -> Result<()> {
+        use crate::project::Pipe;
+
+        let mut project = tank_project()?;
+        let mut inlet_valve = project
+            .parts
+            .iter()
+            .find(|part| part.id == "valve")
+            .unwrap()
+            .clone();
+        inlet_valve.id = "inlet-valve".into();
+        inlet_valve.name = "Inlet valve".into();
+        inlet_valve.position = [-0.5, 0.2, 0.0];
+        project.parts.push(inlet_valve);
+        let inlet_pipe = project
+            .pipes
+            .iter_mut()
+            .find(|pipe| pipe.to == "tank")
+            .unwrap();
+        inlet_pipe.to = "inlet-valve".into();
+        project.pipes.push(Pipe::new("inlet-valve", "tank"));
+
+        let mut simulation = Simulation::new(project)?;
+        simulation.command("pump.target_l_s", Value::Float(0.2))?;
+        simulation.step();
+        assert_eq!(number(&simulation.tags, "pump", "flow_l_s"), 0.0);
+        assert!(number(&simulation.tags, "tank", "outflow_l_s") > 0.0);
+        assert!(number(&simulation.tags, "tank", "level_pct") < 50.0);
+
+        simulation.command("inlet-valve.opening_pct", Value::Float(50.0))?;
+        simulation.step();
+        let partial = number(&simulation.tags, "tank", "inflow_l_s");
+        assert!(partial > 0.0);
+        assert!(number(&simulation.tags, "tank", "outflow_l_s") > 0.0);
+
+        simulation.command("inlet-valve.opening_pct", Value::Float(100.0))?;
+        simulation.step();
+        let full = number(&simulation.tags, "tank", "inflow_l_s");
+        assert!(full > partial && full < 0.2);
+        Ok(())
+    }
+
+    #[test]
+    fn full_tank_admits_only_what_the_drain_releases() -> Result<()> {
+        let mut project = tank_project()?;
+        let PartKind::HeatedTank(tank) = &mut project.parts[0].kind else {
+            unreachable!("tank example");
+        };
+        tank.initial_volume_l = Some(tank.volume_l);
+        let mut simulation = Simulation::new(project)?;
+        simulation.command("pump.target_l_s", Value::Float(0.25))?;
+        simulation.step();
+        assert_eq!(number(&simulation.tags, "tank", "level_pct"), 100.0);
+        let outflow = number(&simulation.tags, "drain", "flow_l_s");
+        assert!(outflow > 0.0);
+        assert_eq!(number(&simulation.tags, "pump", "flow_l_s"), outflow);
+        Ok(())
+    }
+
+    #[cfg(feature = "studio")]
+    #[test]
+    fn disconnecting_a_pipe_preserves_the_running_tank_state() -> Result<()> {
+        let project = tank_project()?;
+        let mut simulation = Simulation::new(project.clone())?;
+        simulation.command("pump.target_l_s", Value::Float(0.25))?;
+        for _ in 0..HZ * 5 {
+            simulation.step();
+        }
+        let level = number(&simulation.tags, "tank", "level_pct");
+        let temperature = number(&simulation.tags, "tank", "temperature_c");
+        let mut pipes = project.pipes;
+        pipes.retain(|pipe| pipe.to != "drain");
+        simulation.set_pipes(pipes)?;
+        assert_eq!(number(&simulation.tags, "tank", "level_pct"), level);
+        assert_eq!(
+            number(&simulation.tags, "tank", "temperature_c"),
+            temperature
+        );
+        assert_eq!(number(&simulation.tags, "pump", "target_l_s"), 0.25);
+        assert!(number(&simulation.tags, "tank", "inflow_l_s") > 0.0);
+        assert_eq!(number(&simulation.tags, "tank", "outflow_l_s"), 0.0);
+        simulation.step();
+        assert!(number(&simulation.tags, "tank", "level_pct") > level);
+        Ok(())
+    }
+
+    #[test]
+    fn water_pipes_enforce_direction_and_free_ports_and_are_removed_with_part() -> Result<()> {
+        use crate::project::Pipe;
+
+        let project = tank_project()?;
+        let mut invalid = project.clone();
+        invalid.pipes.push(Pipe::new("drain", "source"));
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("no water outlet")
+        );
+
+        let mut invalid = project.clone();
+        invalid.pipes.push(invalid.pipes[0].clone());
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("already connected")
+        );
+
+        let mut cycle = project.clone();
+        cycle.pipes = vec![Pipe::new("pump", "tank"), Pipe::new("tank", "pump")];
+        assert!(cycle.validate().unwrap_err().to_string().contains("cycle"));
+
+        let mut edited = project;
+        assert!(edited.remove_part("pump"));
+        assert_eq!(edited.pipes.len(), 2);
+        edited.validate()
+    }
+
+    #[cfg(any(feature = "studio", feature = "web"))]
+    #[test]
+    fn pipe_markers_follow_each_outlet_volume() -> Result<()> {
+        let mut simulation = Simulation::new(tank_project()?)?;
+        simulation.step();
+        let snapshot = simulation.snapshot();
+        assert!(
+            !snapshot
+                .water_outlet_volume_l
+                .contains_key(&("pump".to_owned(), 0))
+        );
+        let drained = snapshot.water_outlet_volume_l[&("tank".to_owned(), 0)];
+        assert!(drained > 0.0);
+        assert_eq!(
+            snapshot.water_outlet_volume_l[&("valve".to_owned(), 0)],
+            drained
+        );
+
+        simulation.command("pump.target_l_s", Value::Float(0.2))?;
+        simulation.step();
+        let snapshot = simulation.snapshot();
+        let supplied = snapshot.water_outlet_volume_l[&("pump".to_owned(), 0)];
+        let rate = number(&snapshot.tags, "pump", "flow_l_s");
+        assert!(supplied > 0.0);
+        assert!((supplied * f64::from(HZ) - f64::from(rate)).abs() < 1e-8);
+        simulation.refresh_water_sensors();
+        assert_eq!(
+            simulation.snapshot().water_outlet_volume_l,
+            snapshot.water_outlet_volume_l
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tank_temperature_depends_on_model_time() -> Result<()> {
+        let project = tank_project()?;
+        let PartKind::HeatedTank(mut config) = project.parts[0].kind else {
+            panic!("heated tank example must include a heated tank");
+        };
+        config.initial_volume_l = Some(config.volume_l);
+        for dt in [0.01, 0.2, 1.0, 60.0] {
+            let mut tank = thermal::Tank::new(config);
+            for _ in 1..(60.0_f64 / dt).round() as u32 {
+                tank.step(
+                    dt,
+                    true,
+                    50.0,
+                    fluid::Flow {
+                        rate_l_s: 0.02,
+                        temperature_c: 15.0,
+                        dirt_mg_l: 0.0,
+                    },
+                    0.02,
+                );
+            }
+            let output = tank.step(
+                dt,
+                true,
+                50.0,
+                fluid::Flow {
+                    rate_l_s: 0.02,
+                    temperature_c: 15.0,
+                    dirt_mg_l: 0.0,
+                },
+                0.02,
+            );
+            assert!(
+                (output.temperature_c - 20.205456).abs() < 0.00001,
+                "dt = {dt}"
+            );
+        }
+
+        config.heat_loss_w_per_k = 0.0;
+        let mut tank = thermal::Tank::new(config);
+        let output = tank.step(60.0, true, 100.0, fluid::Flow::default(), 0.0);
+        assert!((output.temperature_c - 20.717703).abs() < 0.00001);
+        Ok(())
+    }
 
     #[test]
     fn conveyor_carries_parcel_to_detector_and_exit() -> Result<()> {

@@ -22,6 +22,8 @@ pub struct Project {
     #[serde(default)]
     pub production: Production,
     pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipes: Vec<Pipe>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub products: BTreeMap<String, Product>,
     #[serde(default)]
@@ -30,6 +32,40 @@ pub struct Project {
     pub initial_commands: BTreeMap<String, Value>,
     #[serde(default)]
     pub drivers: Vec<Driver>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pipe {
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "first_port")]
+    pub from_port: u8,
+    #[serde(default, skip_serializing_if = "first_port")]
+    pub to_port: u8,
+    #[serde(default = "default_pipe_resistance")]
+    pub resistance_per_m: f32,
+}
+
+impl Pipe {
+    #[cfg(any(feature = "studio", test))]
+    pub fn new(from: impl Into<String>, to: impl Into<String>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            from_port: 0,
+            to_port: 0,
+            resistance_per_m: default_pipe_resistance(),
+        }
+    }
+}
+
+fn first_port(port: &u8) -> bool {
+    *port == 0
+}
+
+const fn default_pipe_resistance() -> f32 {
+    3.0
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -99,9 +135,292 @@ pub enum PartKind {
     Staff {
         staff: Staff,
     },
+    HeatedTank(HeatedTank),
+    WaterSource {
+        size: [f32; 3],
+        temperature_c: f32,
+        max_flow_l_s: f32,
+        #[serde(default)]
+        dirt_mg_l: f32,
+    },
+    WaterPump {
+        size: [f32; 3],
+        max_flow_l_s: f32,
+        #[serde(default = "default_pump_head")]
+        shutoff_head_m: f32,
+        #[serde(default = "default_pump_dirt_limit")]
+        dirt_limit_mg: f32,
+    },
+    WaterValve {
+        size: [f32; 3],
+        max_flow_l_s: f32,
+        #[serde(default = "default_open_valve_resistance")]
+        open_resistance: f32,
+    },
+    WaterDrain {
+        size: [f32; 3],
+        #[serde(default = "default_drain_flow")]
+        max_flow_l_s: f32,
+    },
+    WaterJunction {
+        size: [f32; 3],
+        mixing: bool,
+    },
+    WaterInstrument {
+        size: [f32; 3],
+        measurement: WaterMeasurement,
+    },
+    WaterFilter {
+        size: [f32; 3],
+        clean_resistance: f32,
+        dirty_resistance: f32,
+        capacity_mg: f32,
+        efficiency_pct: f32,
+    },
+    WaterHeater {
+        size: [f32; 3],
+        max_power_w: f32,
+    },
+    WaterHeatExchanger {
+        size: [f32; 3],
+        conductance_w_k: f32,
+        resistance: f32,
+    },
+    WaterFiller {
+        size: [f32; 3],
+        max_flow_l_s: f32,
+        dose_l: f32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaterMeasurement {
+    Flow,
+    Temperature,
+    Pressure,
+}
+
+pub const fn default_pump_dirt_limit() -> f32 {
+    250.0
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeatedTank {
+    pub size: [f32; 3],
+    pub volume_l: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_volume_l: Option<f32>,
+    pub initial_temperature_c: f32,
+    pub ambient_temperature_c: f32,
+    pub heat_loss_w_per_k: f32,
+    pub heater_max_w: f32,
+    #[serde(default)]
+    pub networked: bool,
+    #[serde(default)]
+    pub feed_temperature_c: f32,
+    #[serde(default)]
+    pub feed_max_l_s: f32,
+    #[serde(default)]
+    pub initial_dirt_mg_l: f32,
+}
+
+#[cfg(any(feature = "studio", feature = "web"))]
+impl Default for HeatedTank {
+    fn default() -> Self {
+        Self {
+            size: [0.6, 1.2, 0.6],
+            volume_l: 40.0,
+            initial_volume_l: Some(20.0),
+            initial_temperature_c: 20.0,
+            ambient_temperature_c: 20.0,
+            heat_loss_w_per_k: 8.0,
+            heater_max_w: 2000.0,
+            networked: true,
+            feed_temperature_c: 0.0,
+            feed_max_l_s: 0.0,
+            initial_dirt_mg_l: 0.0,
+        }
+    }
+}
+
+impl HeatedTank {
+    pub fn starting_volume_l(&self) -> f32 {
+        if self.networked {
+            self.initial_volume_l.unwrap_or(self.volume_l)
+        } else {
+            self.volume_l
+        }
+    }
+}
+
+pub const fn default_pump_head() -> f32 {
+    4.0
+}
+
+pub const fn default_open_valve_resistance() -> f32 {
+    16.0
+}
+
+pub const fn default_drain_flow() -> f32 {
+    0.03
+}
+
+impl Part {
+    pub fn water_port(&self, outlet: bool) -> Option<([f64; 3], [f64; 3])> {
+        self.water_port_at(outlet, 0)
+    }
+
+    pub fn water_port_at(&self, outlet: bool, port: u8) -> Option<([f64; 3], [f64; 3])> {
+        if port >= self.kind.water_port_count(outlet) {
+            return None;
+        }
+        let side = if outlet { 1.0 } else { -1.0 };
+        let mut z = 0.0;
+        let (x, y, direction_x, direction_y) = match self.kind {
+            PartKind::WaterSource {
+                size: [x, y, _], ..
+            } if outlet => (0.45 * x, -0.25 * y, 1.0, 0.0),
+            PartKind::WaterPump { size: [x, ..], .. } if outlet => (0.43 * x, 0.0, 1.0, 0.0),
+            PartKind::WaterPump { size: [x, ..], .. } => (-0.44 * x, 0.0, -1.0, 0.0),
+            PartKind::WaterValve {
+                size: [x, y, _], ..
+            } if outlet => (0.49 * x, -0.08 * y, 1.0, 0.0),
+            PartKind::WaterValve {
+                size: [x, y, _], ..
+            } => (-0.49 * x, -0.08 * y, -1.0, 0.0),
+            PartKind::HeatedTank(tank) if tank.networked && outlet => {
+                (0.5 * tank.size[0], -0.31 * tank.size[1], 1.0, 0.0)
+            }
+            PartKind::HeatedTank(tank) if tank.networked => {
+                (-0.5 * tank.size[0], 0.16 * tank.size[1], -1.0, 0.0)
+            }
+            PartKind::WaterDrain {
+                size: [_, y, _], ..
+            } if !outlet => (0.0, 0.5 * y, 0.0, 1.0),
+            PartKind::WaterJunction {
+                size: [x, _, width],
+                ..
+            } => {
+                if self.kind.water_port_count(outlet) == 2 {
+                    z = if port == 0 {
+                        -0.32 * width
+                    } else {
+                        0.32 * width
+                    };
+                }
+                (side * x * 0.5, 0.0, f64::from(side), 0.0)
+            }
+            PartKind::WaterHeatExchanger {
+                size: [x, _, width],
+                ..
+            } => {
+                z = if port == 0 {
+                    -0.30 * width
+                } else {
+                    0.30 * width
+                };
+                (side * x * 0.5, 0.0, f64::from(side), 0.0)
+            }
+            PartKind::WaterInstrument { size: [x, ..], .. }
+            | PartKind::WaterFilter { size: [x, ..], .. }
+            | PartKind::WaterHeater { size: [x, ..], .. } => {
+                (side * x * 0.5, 0.0, f64::from(side), 0.0)
+            }
+            PartKind::WaterFiller {
+                size: [x, y, _], ..
+            } => (-0.5 * x, 0.25 * y, -1.0, 0.0),
+            _ => return None,
+        };
+        let (sin, cos) = f64::from(self.yaw).to_radians().sin_cos();
+        let [px, py, pz] = self.position.map(f64::from);
+        Some((
+            [
+                px + cos * f64::from(x) + sin * f64::from(z),
+                py + f64::from(y),
+                pz - sin * f64::from(x) + cos * f64::from(z),
+            ],
+            [cos * direction_x, direction_y, -sin * direction_x],
+        ))
+    }
+}
+
+pub fn water_pipe_points(
+    from: &Part,
+    from_port: u8,
+    to: &Part,
+    to_port: u8,
+) -> Option<[[f64; 3]; 4]> {
+    let (outlet, out_dir) = from.water_port_at(true, from_port)?;
+    let (inlet, in_dir) = to.water_port_at(false, to_port)?;
+    let reach = (water_distance(outlet, inlet) * 0.25).min(0.16);
+    let extend = |point: [f64; 3], dir: [f64; 3]| {
+        std::array::from_fn(|index| point[index] + dir[index] * reach)
+    };
+    Some([
+        outlet,
+        extend(outlet, out_dir),
+        extend(inlet, in_dir),
+        inlet,
+    ])
+}
+
+pub fn water_distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a.into_iter()
+        .zip(b)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt()
 }
 
 impl PartKind {
+    pub fn water_port_count(&self, outlet: bool) -> u8 {
+        match self {
+            Self::WaterSource { .. } => u8::from(outlet),
+            Self::WaterDrain { .. } | Self::WaterFiller { .. } => u8::from(!outlet),
+            Self::WaterJunction { mixing, .. } => {
+                if *mixing == outlet {
+                    1
+                } else {
+                    2
+                }
+            }
+            Self::WaterHeatExchanger { .. } => 2,
+            Self::HeatedTank(tank) => u8::from(tank.networked),
+            Self::WaterPump { .. }
+            | Self::WaterValve { .. }
+            | Self::WaterInstrument { .. }
+            | Self::WaterFilter { .. }
+            | Self::WaterHeater { .. } => 1,
+            _ => 0,
+        }
+    }
+
+    pub fn has_water_inlet(&self) -> bool {
+        self.water_port_count(false) > 0
+    }
+    pub fn has_water_outlet(&self) -> bool {
+        self.water_port_count(true) > 0
+    }
+
+    pub fn water_size(&self) -> Option<[f32; 3]> {
+        match *self {
+            Self::WaterSource { size, .. }
+            | Self::WaterPump { size, .. }
+            | Self::WaterValve { size, .. }
+            | Self::WaterDrain { size, .. }
+            | Self::WaterJunction { size, .. }
+            | Self::WaterInstrument { size, .. }
+            | Self::WaterFilter { size, .. }
+            | Self::WaterHeater { size, .. }
+            | Self::WaterHeatExchanger { size, .. }
+            | Self::WaterFiller { size, .. } => Some(size),
+            Self::HeatedTank(tank) => Some(tank.size),
+            _ => None,
+        }
+    }
+
     pub fn feed_surface(&self) -> Option<[f32; 3]> {
         match *self {
             Self::Conveyor { size, .. }
@@ -145,6 +464,22 @@ impl PartKind {
                 "Technician"
             }
             Self::Staff { .. } => "Operator",
+            Self::HeatedTank(_) => "Heated tank",
+            Self::WaterSource { .. } => "Water source",
+            Self::WaterPump { .. } => "Water pump",
+            Self::WaterValve { .. } => "Control valve",
+            Self::WaterDrain { .. } => "Water drain",
+            Self::WaterJunction { mixing: false, .. } => "Water splitter",
+            Self::WaterJunction { mixing: true, .. } => "Water mixer",
+            Self::WaterInstrument { measurement, .. } => match measurement {
+                WaterMeasurement::Flow => "Water flow meter",
+                WaterMeasurement::Temperature => "Water thermometer",
+                WaterMeasurement::Pressure => "Water pressure gauge",
+            },
+            Self::WaterFilter { .. } => "Water filter",
+            Self::WaterHeater { .. } => "Inline water heater",
+            Self::WaterHeatExchanger { .. } => "Water heat exchanger",
+            Self::WaterFiller { .. } => "Liquid filler",
         }
     }
 }
@@ -365,6 +700,7 @@ impl Project {
             return false;
         };
         self.parts.remove(index);
+        self.pipes.retain(|pipe| pipe.from != id && pipe.to != id);
         for part in &mut self.parts {
             if let PartKind::Emitter {
                 random_spawn_belt, ..
@@ -398,6 +734,56 @@ impl Project {
             }
         }
         true
+    }
+
+    fn check_pipe(&self, pipe: &Pipe, existing: &[Pipe]) -> Result<()> {
+        let (from, to) = (pipe.from.as_str(), pipe.to.as_str());
+        ensure!(from != to, "a water pipe cannot connect {from} to itself");
+        let sizes = |id, outlet| {
+            self.parts
+                .iter()
+                .find(|part| part.id == id)
+                .map_or(0, |part| part.kind.water_port_count(outlet))
+        };
+        ensure!(
+            pipe.from_port < sizes(from, true),
+            "{from} has no water outlet {}",
+            u16::from(pipe.from_port) + 1
+        );
+        ensure!(
+            pipe.to_port < sizes(to, false),
+            "{to} has no water inlet {}",
+            u16::from(pipe.to_port) + 1
+        );
+        ensure!(
+            !existing.iter().any(
+                |other| (other.from == from && other.from_port == pipe.from_port)
+                    || (other.to == to && other.to_port == pipe.to_port)
+            ),
+            "water port already connected in {from} → {to}"
+        );
+        let mut pending = vec![to];
+        let mut visited = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            ensure!(
+                node != from,
+                "water pipe {from} → {to} would create a cycle"
+            );
+            if visited.insert(node) {
+                pending.extend(
+                    existing
+                        .iter()
+                        .filter(|p| p.from == node)
+                        .map(|p| p.to.as_str()),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "studio")]
+    pub fn can_connect_pipe(&self, pipe: &Pipe) -> bool {
+        self.check_pipe(pipe, &self.pipes).is_ok()
     }
 
     pub fn tags(&self) -> BTreeMap<String, Tag> {
@@ -704,7 +1090,229 @@ impl Project {
                     role("on_duty", "On duty", Sensor, Bool(false), None);
                     role("busy", "Busy", Sensor, Bool(false), None);
                 }
-                PartKind::Crate { .. } | PartKind::Barrier { .. } | PartKind::FlowGuide { .. } => {}
+                PartKind::HeatedTank(tank) => {
+                    role("mixer_on", "Mixer on", Actuator, Bool(false), None);
+                    role(
+                        "heater_pct",
+                        "Heater command (%)",
+                        Actuator,
+                        Float(0.0),
+                        Some([0.0, 100.0]),
+                    );
+                    if !tank.networked {
+                        role(
+                            "feed_l_s",
+                            "Water feed (L/s)",
+                            Actuator,
+                            Float(0.0),
+                            Some([0.0, tank.feed_max_l_s]),
+                        );
+                    }
+                    role(
+                        "temperature_c",
+                        "Water temperature (°C)",
+                        Sensor,
+                        Float(tank.initial_temperature_c),
+                        None,
+                    );
+                    role(
+                        "heater_actual_w",
+                        "Heater output (W)",
+                        Sensor,
+                        Float(0.0),
+                        Some([0.0, tank.heater_max_w]),
+                    );
+                    role(
+                        "heater_blocked",
+                        "Heater blocked",
+                        Sensor,
+                        Bool(false),
+                        None,
+                    );
+                    role(
+                        "level_pct",
+                        "Water level (%)",
+                        Sensor,
+                        Float(tank.starting_volume_l() / tank.volume_l * 100.0),
+                        Some([0.0, 100.0]),
+                    );
+                    if tank.networked {
+                        role("inflow_l_s", "Inlet flow (L/s)", Sensor, Float(0.0), None);
+                        role("outflow_l_s", "Outlet flow (L/s)", Sensor, Float(0.0), None);
+                    }
+                }
+                PartKind::WaterPump { max_flow_l_s, .. } => {
+                    role(
+                        "target_l_s",
+                        "Pump flow at zero head (L/s)",
+                        Actuator,
+                        Float(0.0),
+                        Some([0.0, max_flow_l_s]),
+                    );
+                    role(
+                        "reset_fault",
+                        "Reset pump fault",
+                        Actuator,
+                        Bool(false),
+                        None,
+                    );
+                    role("failed", "Pump failed", Sensor, Bool(false), None);
+                    role("wear_pct", "Pump wear (%)", Sensor, Float(0.0), None);
+                    role("failures", "Pump failures", Sensor, Int(0), None);
+                }
+                PartKind::WaterValve { .. } => {
+                    role(
+                        "opening_pct",
+                        "Valve opening (%)",
+                        Actuator,
+                        Float(0.0),
+                        Some([0.0, 100.0]),
+                    );
+                }
+                PartKind::WaterInstrument { measurement, .. } => match measurement {
+                    WaterMeasurement::Flow => {}
+                    WaterMeasurement::Temperature => role(
+                        "temperature_c",
+                        "Water temperature (°C)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    ),
+                    WaterMeasurement::Pressure => role(
+                        "pressure_kpa",
+                        "Water pressure (kPa)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    ),
+                },
+                PartKind::WaterFilter { .. } => {
+                    role(
+                        "replace",
+                        "Replace filter cartridge",
+                        Actuator,
+                        Bool(false),
+                        None,
+                    );
+                    role(
+                        "loading_pct",
+                        "Filter loading (%)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                    role(
+                        "pressure_drop_kpa",
+                        "Pressure drop (kPa)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                    role(
+                        "inlet_dirt_mg_l",
+                        "Inlet dirt (mg/L)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                }
+                PartKind::WaterHeater { max_power_w, .. } => {
+                    role(
+                        "power_pct",
+                        "Heater command (%)",
+                        Actuator,
+                        Float(0.0),
+                        Some([0.0, 100.0]),
+                    );
+                    role(
+                        "power_w",
+                        "Heater output (W)",
+                        Sensor,
+                        Float(0.0),
+                        Some([0.0, max_power_w]),
+                    );
+                }
+                PartKind::WaterHeatExchanger { .. } => {
+                    role(
+                        "heat_w",
+                        "Heat to second circuit (W)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                    role(
+                        "outlet_2_temperature_c",
+                        "Second outlet temperature (°C)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                    role(
+                        "outlet_2_dirt_mg_l",
+                        "Second outlet dirt (mg/L)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                }
+                PartKind::WaterFiller { dose_l, .. } => {
+                    role("fill", "Fill container", Actuator, Bool(false), None);
+                    role(
+                        "target_l",
+                        "Target dose (L)",
+                        Actuator,
+                        Float(dose_l),
+                        Some([0.0, f32::MAX]),
+                    );
+                    role(
+                        "container_present",
+                        "Container present",
+                        Sensor,
+                        Bool(false),
+                        None,
+                    );
+                    role(
+                        "filled_l",
+                        "Liquid in container (L)",
+                        Sensor,
+                        Float(0.0),
+                        None,
+                    );
+                    role("dose_done", "Dose complete", Sensor, Bool(false), None);
+                }
+                PartKind::Crate { .. }
+                | PartKind::Barrier { .. }
+                | PartKind::FlowGuide { .. }
+                | PartKind::WaterJunction { .. }
+                | PartKind::WaterSource { .. }
+                | PartKind::WaterDrain { .. } => {}
+            }
+            if part.kind.has_water_inlet() || part.kind.has_water_outlet() {
+                role("flow_l_s", "Actual flow (L/s)", Sensor, Float(0.0), None);
+                role("dirt_mg_l", "Water dirt (mg/L)", Sensor, Float(0.0), None);
+                role(
+                    "liquid_temp_c",
+                    "Stream temperature (°C)",
+                    Sensor,
+                    Float(0.0),
+                    None,
+                );
+            }
+            if part.kind.water_port_count(true) > 1 {
+                role(
+                    "outlet_1_l_s",
+                    "First outlet flow (L/s)",
+                    Sensor,
+                    Float(0.0),
+                    None,
+                );
+                role(
+                    "outlet_2_l_s",
+                    "Second outlet flow (L/s)",
+                    Sensor,
+                    Float(0.0),
+                    None,
+                );
             }
         }
         result
@@ -800,6 +1408,108 @@ impl Project {
                 }
                 PartKind::Crate { size, mass } => positive(&[mass]) && positive(&size),
                 PartKind::Remover { size } | PartKind::Barrier { size } => positive(&size),
+                PartKind::HeatedTank(tank) => {
+                    positive(&tank.size)
+                        && [tank.volume_l, tank.heater_max_w]
+                            .into_iter()
+                            .all(|value| value.is_finite() && value > 0.0)
+                        && [tank.heat_loss_w_per_k, tank.feed_max_l_s]
+                            .into_iter()
+                            .all(|value| value.is_finite() && value >= 0.0)
+                        && tank
+                            .initial_volume_l
+                            .is_none_or(|volume| (0.0..=tank.volume_l).contains(&volume))
+                        && (0.0..100.0).contains(&tank.initial_temperature_c)
+                        && (0.0..100.0).contains(&tank.ambient_temperature_c)
+                        && (0.0..100.0).contains(&tank.feed_temperature_c)
+                        && tank.initial_dirt_mg_l.is_finite()
+                        && tank.initial_dirt_mg_l >= 0.0
+                }
+                PartKind::WaterSource {
+                    size,
+                    temperature_c,
+                    max_flow_l_s,
+                    dirt_mg_l,
+                } => {
+                    positive(&size)
+                        && (0.0..100.0).contains(&temperature_c)
+                        && dirt_mg_l.is_finite()
+                        && dirt_mg_l >= 0.0
+                        && max_flow_l_s.is_finite()
+                        && max_flow_l_s >= 0.0
+                }
+                PartKind::WaterPump {
+                    size,
+                    max_flow_l_s,
+                    shutoff_head_m,
+                    dirt_limit_mg,
+                } => {
+                    positive(&size)
+                        && max_flow_l_s.is_finite()
+                        && max_flow_l_s >= 0.0
+                        && shutoff_head_m.is_finite()
+                        && shutoff_head_m > 0.0
+                        && dirt_limit_mg.is_finite()
+                        && dirt_limit_mg > 0.0
+                }
+                PartKind::WaterValve {
+                    size,
+                    max_flow_l_s,
+                    open_resistance,
+                } => {
+                    positive(&size)
+                        && max_flow_l_s.is_finite()
+                        && max_flow_l_s >= 0.0
+                        && open_resistance.is_finite()
+                        && open_resistance >= 0.0
+                }
+                PartKind::WaterDrain { size, max_flow_l_s } => {
+                    positive(&size) && max_flow_l_s.is_finite() && max_flow_l_s >= 0.0
+                }
+                PartKind::WaterJunction { size, .. } | PartKind::WaterInstrument { size, .. } => {
+                    positive(&size)
+                }
+                PartKind::WaterFilter {
+                    size,
+                    clean_resistance,
+                    dirty_resistance,
+                    capacity_mg,
+                    efficiency_pct,
+                } => {
+                    positive(&size)
+                        && clean_resistance.is_finite()
+                        && clean_resistance >= 0.0
+                        && dirty_resistance.is_finite()
+                        && dirty_resistance >= clean_resistance
+                        && capacity_mg.is_finite()
+                        && capacity_mg > 0.0
+                        && (0.0..=100.0).contains(&efficiency_pct)
+                }
+                PartKind::WaterHeater { size, max_power_w } => {
+                    positive(&size) && max_power_w.is_finite() && max_power_w > 0.0
+                }
+                PartKind::WaterHeatExchanger {
+                    size,
+                    conductance_w_k,
+                    resistance,
+                } => {
+                    positive(&size)
+                        && conductance_w_k.is_finite()
+                        && conductance_w_k > 0.0
+                        && resistance.is_finite()
+                        && resistance >= 0.0
+                }
+                PartKind::WaterFiller {
+                    size,
+                    max_flow_l_s,
+                    dose_l,
+                } => {
+                    positive(&size)
+                        && max_flow_l_s.is_finite()
+                        && max_flow_l_s > 0.0
+                        && dose_l.is_finite()
+                        && dose_l > 0.0
+                }
                 PartKind::FlowGuide {
                     length,
                     height,
@@ -898,6 +1608,15 @@ impl Project {
                 ok,
                 "invalid dimensions or operating parameters for {}",
                 part.id
+            );
+        }
+        for (index, pipe) in self.pipes.iter().enumerate() {
+            self.check_pipe(pipe, &self.pipes[..index])?;
+            ensure!(
+                pipe.resistance_per_m.is_finite() && pipe.resistance_per_m > 0.0,
+                "invalid pipe resistance for {} → {}",
+                pipe.from,
+                pipe.to
             );
         }
         let tags = self.tags();

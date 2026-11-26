@@ -1,0 +1,236 @@
+{
+  "version": 1,
+  "name": "Регулирование температуры бака",
+  "production": {
+    "seed": 0,
+    "start": null,
+    "calendars": {}
+  },
+  "parts": [
+    {
+      "id": "tank",
+      "name": "Бак с подогревом",
+      "position": [
+        0.23963585,
+        0.6,
+        0.06628808
+      ],
+      "yaw": 0.0,
+      "kind": "heated_tank",
+      "size": [
+        0.6,
+        1.2,
+        0.6
+      ],
+      "volume_l": 40.0,
+      "initial_volume_l": 20.0,
+      "initial_temperature_c": 20.0,
+      "ambient_temperature_c": 20.0,
+      "heat_loss_w_per_k": 8.0,
+      "heater_max_w": 2000.0,
+      "networked": true,
+      "feed_temperature_c": 0.0,
+      "feed_max_l_s": 0.0
+    },
+    {
+      "id": "source",
+      "name": "Источник холодной воды",
+      "position": [
+        -2.0,
+        0.45,
+        0.0
+      ],
+      "yaw": 0.0,
+      "kind": "water_source",
+      "size": [
+        0.5,
+        0.9,
+        0.5
+      ],
+      "temperature_c": 15.0,
+      "max_flow_l_s": 0.25
+    },
+    {
+      "id": "pump",
+      "name": "Насос подачи",
+      "position": [
+        -0.9553348,
+        0.16,
+        0.03940523
+      ],
+      "yaw": 0.0,
+      "kind": "water_pump",
+      "size": [
+        0.42,
+        0.32,
+        0.32
+      ],
+      "max_flow_l_s": 0.3
+    },
+    {
+      "id": "valve",
+      "name": "Клапан слива",
+      "position": [
+        1.0084269,
+        0.22,
+        0.11183809
+      ],
+      "yaw": 0.0,
+      "kind": "water_valve",
+      "size": [
+        0.3,
+        0.25,
+        0.23
+      ],
+      "max_flow_l_s": 0.25
+    },
+    {
+      "id": "drain",
+      "name": "Слив",
+      "position": [
+        1.65,
+        0.065,
+        0.0
+      ],
+      "yaw": 0.0,
+      "kind": "water_drain",
+      "size": [
+        0.42,
+        0.13,
+        0.42
+      ],
+      "max_flow_l_s": 0.25
+    },
+    {
+      "id": "part-1",
+      "name": "Регулируемый клапан",
+      "position": [
+        -0.5074914,
+        0.125,
+        0.0009914637
+      ],
+      "yaw": 0.0,
+      "kind": "water_valve",
+      "size": [
+        0.3,
+        0.25,
+        0.23
+      ],
+      "max_flow_l_s": 0.25
+    }
+  ],
+  "pipes": [
+    {
+      "from": "source",
+      "to": "pump"
+    },
+    {
+      "from": "tank",
+      "to": "valve"
+    },
+    {
+      "from": "valve",
+      "to": "drain"
+    },
+    {
+      "from": "pump",
+      "to": "part-1"
+    },
+    {
+      "from": "part-1",
+      "to": "tank"
+    }
+  ],
+  "tag_names": {},
+  "initial_commands": {
+    "pump.target_l_s": 0.0,
+    "tank.heater_pct": 0.0,
+    "tank.mixer_on": false,
+    "valve.opening_pct": 40.0
+  },
+  "drivers": [
+    {
+      "id": "tank_modbus",
+      "enabled": false,
+      "poll_ms": 33,
+      "on_disconnect": "reset",
+      "protocol": "modbus_server",
+      "address": "127.0.0.1:1502",
+      "unit_id": 1,
+      "bindings": [
+        {
+          "tag": "tank.mixer_on",
+          "area": "coil",
+          "address": 0,
+          "scale": 100.0
+        },
+        {
+          "tag": "tank.heater_pct",
+          "area": "holding_register",
+          "address": 0,
+          "scale": 100.0
+        },
+        {
+          "tag": "pump.target_l_s",
+          "area": "holding_register",
+          "address": 1,
+          "scale": 10000.0
+        },
+        {
+          "tag": "valve.opening_pct",
+          "area": "holding_register",
+          "address": 2,
+          "scale": 100.0
+        },
+        {
+          "tag": "tank.temperature_c",
+          "area": "input_register",
+          "address": 0,
+          "scale": 100.0
+        },
+        {
+          "tag": "tank.heater_actual_w",
+          "area": "input_register",
+          "address": 1,
+          "scale": 1.0
+        },
+        {
+          "tag": "drain.flow_l_s",
+          "area": "input_register",
+          "address": 2,
+          "scale": 10000.0
+        },
+        {
+          "tag": "tank.level_pct",
+          "area": "input_register",
+          "address": 3,
+          "scale": 100.0
+        },
+        {
+          "tag": "tank.inflow_l_s",
+          "area": "input_register",
+          "address": 4,
+          "scale": 10000.0
+        },
+        {
+          "tag": "tank.outflow_l_s",
+          "area": "input_register",
+          "address": 5,
+          "scale": 10000.0
+        },
+        {
+          "tag": "valve.flow_l_s",
+          "area": "input_register",
+          "address": 6,
+          "scale": 10000.0
+        },
+        {
+          "tag": "tank.heater_blocked",
+          "area": "discrete_input",
+          "address": 0,
+          "scale": 100.0
+        }
+      ]
+    }
+  ]
+}
