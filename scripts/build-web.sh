@@ -18,3 +18,9 @@ cp -- web/index.html web/site.css web/tokens.css web/base.css "$output/"
 cp -R -- web/assets web/demo "$output/"
 wasm-bindgen --target web --no-typescript --out-dir "$output/demo/pkg" \
     "$target_dir/$wasm_target/release/factory_sim.wasm"
+
+
+# Keep the JavaScript loader and WASM on the same release across browser caches.
+demo="$output/demo"
+revision="$(cat "$demo/demo.js" "$demo/pkg/factory_sim.js" "$demo/pkg/factory_sim_bg.wasm" | cksum | awk '{print $1}')"
+sed "s|src=\"./demo.js\"|src=\"./demo.js?v=$revision\"|" web/demo/index.html > "$demo/index.html"

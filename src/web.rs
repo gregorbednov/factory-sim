@@ -15,7 +15,7 @@ mod snap;
 #[path = "studio/viewport.rs"]
 mod viewport;
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use eframe::egui;
 use egui::Context;
@@ -155,6 +155,7 @@ struct WebStudio {
     camera: Camera,
     object_drag: Option<ObjectDrag>,
     selection: Option<String>,
+    quality: render::GraphicsQuality,
 }
 
 impl eframe::App for WebStudio {
@@ -171,7 +172,7 @@ impl eframe::App for WebStudio {
                     ui,
                     i18n::Language::Russian,
                     &mut self.camera,
-                    render::GraphicsQuality::Balanced,
+                    self.quality,
                     demo.project(),
                     &demo.snapshot,
                     self.selection.as_deref(),
@@ -214,8 +215,29 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 }
 
 #[wasm_bindgen]
-pub async fn start_demo(canvas: web_sys::HtmlCanvasElement) -> Result<WebDemo, JsValue> {
+pub async fn start_demo(
+    canvas: web_sys::HtmlCanvasElement,
+    webgl: bool,
+) -> Result<WebDemo, JsValue> {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+
     let _ = eframe::WebLogger::init(log::LevelFilter::Warn);
+    let mut setup = WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = if webgl {
+        wgpu::Backends::GL
+    } else {
+        wgpu::Backends::BROWSER_WEBGPU
+    };
+    if webgl {
+        setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
+            label: Some("Factory Sim WebGL2 device"),
+            required_limits: wgpu::Limits {
+                max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d.min(8192),
+                ..wgpu::Limits::downlevel_webgl2_defaults()
+            },
+            ..Default::default()
+        });
+    }
     let project = serde_json::from_str(CELL).map_err(js_error)?;
     let demo = Rc::new(RefCell::new(Demo::new(project).map_err(js_error)?));
     let state = demo.clone();
@@ -225,13 +247,17 @@ pub async fn start_demo(canvas: web_sys::HtmlCanvasElement) -> Result<WebDemo, J
             canvas,
             eframe::WebOptions {
                 renderer: eframe::Renderer::Wgpu,
+                wgpu_options: WgpuConfiguration {
+                    wgpu_setup: WgpuSetup::CreateNew(setup),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             Box::new(move |cc| {
                 let graphics = cc
                     .wgpu_render_state
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("WebGPU unavailable"))?;
+                    .ok_or_else(|| anyhow::anyhow!("Browser graphics unavailable"))?;
                 render::install(graphics);
                 cc.egui_ctx.set_visuals(egui::Visuals::dark());
                 state.borrow_mut().context = cc.egui_ctx.clone();
@@ -240,6 +266,11 @@ pub async fn start_demo(canvas: web_sys::HtmlCanvasElement) -> Result<WebDemo, J
                     camera: Camera::default(),
                     object_drag: None,
                     selection: None,
+                    quality: if webgl {
+                        render::GraphicsQuality::Performance
+                    } else {
+                        render::GraphicsQuality::Balanced
+                    },
                 }))
             }),
         )

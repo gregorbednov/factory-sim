@@ -46,7 +46,7 @@ stl_io = { version = "0.10", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["wgpu_no_default_features", "default_fonts"], optional = true }
-wgpu = { version = "30", default-features = false, features = ["std", "webgpu", "wgsl", "fragile-send-sync-non-atomic-wasm"], optional = true }
+wgpu = { version = "30", default-features = false, features = ["std", "webgpu", "webgl", "wgsl", "fragile-send-sync-non-atomic-wasm"], optional = true }
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }

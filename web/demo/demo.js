@@ -9,15 +9,35 @@ function showNotice(text) {
   notice.hidden = !text;
 }
 
-async function boot() {
-  if (!navigator.gpu) {
-    throw new Error("WebGPU недоступен. Откройте эту страницу по HTTPS в браузере с поддержкой WebGPU.");
+async function startGraphics(startDemo) {
+  if (navigator.gpu) {
+    try {
+      return { demo: await startDemo(byId("scene"), false), backend: "WebGPU" };
+    } catch (error) {
+      console.info("Factory Sim: WebGPU initialization failed; trying WebGL2", error);
+      const canvas = byId("scene");
+      // A canvas that already had a WebGPU context cannot open a WebGL2 context.
+      canvas.replaceWith(canvas.cloneNode(false));
+    }
   }
 
+  byId("boot").textContent = "Запускается режим совместимости WebGL2…";
+  try {
+    return { demo: await startDemo(byId("scene"), true), backend: "WebGL2" };
+  } catch (error) {
+    console.error("Factory Sim: WebGL2 initialization failed", error);
+    throw new Error("Браузер не смог запустить WebGPU или WebGL2. Проверьте, что аппаратное ускорение включено.");
+  }
+}
+
+async function boot() {
   byId("boot").textContent = "Загружается модель производственной ячейки…";
-  const { default: init, start_demo } = await import("./pkg/factory_sim.js");
-  await init();
-  const demo = await start_demo(byId("scene"));
+  const revision = new URL(import.meta.url).search;
+  const { default: init, start_demo } = await import("./pkg/factory_sim.js" + revision);
+  await init({ module_or_path: new URL("./pkg/factory_sim_bg.wasm" + revision, import.meta.url) });
+  const { demo, backend } = await startGraphics(start_demo);
+  byId("graphics").textContent = backend;
+  byId("graphics").hidden = false;
   byId("splash").hidden = true;
 
   let last;
