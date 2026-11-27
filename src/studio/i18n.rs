@@ -38,6 +38,32 @@ impl Language {
                 "Сохранить изменения перед открытием другого проекта?"
             }
             "Scene" => "Сцена",
+            "3D scene" => "3D-сцена",
+            "Process diagram" => "Схема процесса",
+            "Add water equipment to see a process diagram." => {
+                "Добавьте оборудование водяного контура, чтобы построить схему."
+            }
+            "Fit diagram" => "Вписать схему",
+            "Drag symbols or the background. Select a pipe to move its bend." => {
+                "Перетаскивайте символы и фон. Выберите трубу, чтобы переместить её изгиб."
+            }
+            "Diagram properties" => "Свойства на схеме",
+            "Water connections" => "Соединения труб",
+            "Reset pipe bend" => "Сбросить изгиб трубы",
+            "Diagram label" => "Подпись на схеме",
+            "Auto-position symbol" => "Авторазмещение",
+            "Instrumentation (GOST 21.208)" => "КИП (ГОСТ 21.208)",
+            "Add symbol" => "Добавить обозначение",
+            "Remove symbol" => "Удалить обозначение",
+            "Indication" => "Показание",
+            "Transmission" => "Передача сигнала",
+            "Control" => "Регулирование",
+            "Alarm" => "Сигнализация",
+            "Position number" => "Позиционный номер",
+            "No output signal" => "Без выходного сигнала",
+            "The signal documents an external control link." => {
+                "Линия обозначает внешнюю связь управления."
+            }
             "+ Add" => "+ Добавить",
             "Equipment" => "Оборудование",
             "Stations and staff" => "Станции и персонал",

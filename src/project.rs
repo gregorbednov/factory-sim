@@ -12,6 +12,8 @@ use crate::product::{BOXES, Product, ProductSpec};
 
 use crate::production::{self, Emission, Equipment, Machine, Production, Robot, Staff};
 
+pub mod diagram;
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -24,6 +26,8 @@ pub struct Project {
     pub parts: Vec<Part>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipes: Vec<Pipe>,
+    #[serde(default, skip_serializing_if = "diagram::ProcessDiagram::is_empty")]
+    pub process_diagram: diagram::ProcessDiagram,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub products: BTreeMap<String, Product>,
     #[serde(default)]
@@ -676,6 +680,7 @@ impl Project {
             production: Default::default(),
             parts: Vec::new(),
             pipes: Vec::new(),
+            process_diagram: Default::default(),
             products: Default::default(),
             tag_names: Default::default(),
             initial_commands: Default::default(),
@@ -733,6 +738,7 @@ impl Project {
         };
         self.parts.remove(index);
         self.pipes.retain(|pipe| pipe.from != id && pipe.to != id);
+        self.process_diagram.remove_part(id, &self.pipes);
         for part in &mut self.parts {
             if let PartKind::Emitter {
                 random_spawn_belt, ..
@@ -816,6 +822,12 @@ impl Project {
     #[cfg(any(feature = "studio", feature = "web"))]
     pub fn can_connect_pipe(&self, pipe: &Pipe) -> bool {
         self.check_pipe(pipe, &self.pipes).is_ok()
+    }
+
+    #[cfg(any(feature = "studio", feature = "web", test))]
+    pub fn replace_pipes(&mut self, pipes: Vec<Pipe>) {
+        self.process_diagram.retain_routes(&pipes);
+        self.pipes = pipes;
     }
 
     pub fn tags(&self) -> BTreeMap<String, Tag> {
@@ -1676,6 +1688,7 @@ impl Project {
             );
         }
         let tags = self.tags();
+        self.process_diagram.validate(self, &tags)?;
         for (id, name) in &self.tag_names {
             ensure!(
                 tags.contains_key(id) && !name.trim().is_empty(),

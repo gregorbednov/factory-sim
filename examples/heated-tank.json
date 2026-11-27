@@ -141,6 +141,19 @@
       "to": "tank"
     }
   ],
+  "process_diagram": {
+    "instruments": {
+      "tank.level_pct": {
+        "function": "control",
+        "number": 1,
+        "output_tag": "valve.opening_pct"
+      },
+      "tank.temperature_c": {
+        "function": "indication",
+        "number": 2
+      }
+    }
+  },
   "tag_names": {},
   "initial_commands": {
     "pump.target_l_s": 0.0,

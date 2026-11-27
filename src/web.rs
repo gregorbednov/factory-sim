@@ -10,6 +10,8 @@ mod i18n;
 mod inspector;
 #[path = "studio/library.rs"]
 mod library;
+#[path = "studio/process_ui.rs"]
+mod process_ui;
 mod product;
 mod production;
 #[path = "studio/production_ui.rs"]
@@ -31,7 +33,7 @@ use wasm_bindgen::prelude::*;
 
 use i18n::Language;
 use production::Equipment;
-use project::{Direction, Part, PartKind, Project, Value};
+use project::{Direction, Part, PartKind, Pipe, Project, Value, diagram::ProcessDiagram};
 use sim::{HZ, Simulation, Snapshot};
 use viewport::{Camera, ObjectDrag};
 
@@ -100,6 +102,28 @@ impl Demo {
     fn edit(&mut self) -> &mut Project {
         self.unsaved = true;
         self.draft.get_or_insert_with(|| self.sim.project.clone())
+    }
+
+    fn update_diagram(&mut self, diagram: ProcessDiagram) {
+        let project = self.draft.as_mut().unwrap_or(&mut self.sim.project);
+        project.process_diagram = diagram;
+        self.unsaved = true;
+    }
+
+    fn update_pipes(&mut self, pipes: Vec<Pipe>) {
+        if let Some(project) = &mut self.draft {
+            project.replace_pipes(pipes);
+        } else {
+            match self.sim.set_pipes(pipes) {
+                Ok(()) => {
+                    self.unsaved = true;
+                    self.tag_error = None;
+                    self.refresh();
+                }
+                Err(error) => self.tag_error = Some(error.to_string()),
+            }
+        }
+        self.context.request_repaint();
     }
 
     fn place(&mut self, entry: library::Entry, at: Option<[f32; 2]>) -> String {
@@ -300,19 +324,7 @@ impl Demo {
             ui.ctx().request_repaint();
         }
         if let Some(pipes) = pipes {
-            if let Some(project) = &mut self.draft {
-                project.pipes = pipes;
-            } else {
-                match self.sim.set_pipes(pipes) {
-                    Ok(()) => {
-                        self.unsaved = true;
-                        self.tag_error = None;
-                        self.refresh();
-                    }
-                    Err(error) => self.tag_error = Some(error.to_string()),
-                }
-            }
-            ui.ctx().request_repaint();
+            self.update_pipes(pipes);
         }
     }
 
@@ -626,6 +638,7 @@ impl WebApp {
 struct WebStudio {
     demo: Rc<RefCell<Demo>>,
     camera: Camera,
+    process: process_ui::View,
     object_drag: Option<ObjectDrag>,
     quality: render::GraphicsQuality,
 }
@@ -636,6 +649,7 @@ impl eframe::App for WebStudio {
         demo.advance(ui.input(|input| input.time));
         if std::mem::take(&mut demo.reset_view) {
             self.camera = Camera::default();
+            self.process = process_ui::View::default();
             self.object_drag = None;
         }
         if demo.snapshot.running || demo.selection.is_none() {
@@ -658,6 +672,31 @@ impl eframe::App for WebStudio {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
+                self.process.tabs(ui, Language::Russian);
+                if self.process.open {
+                    self.object_drag = None;
+                    if let Some(error) = &demo.tag_error {
+                        ui.colored_label(editor_ui::WARN, Language::Russian.error(error));
+                    }
+                    let edit = self.process.show(
+                        ui,
+                        demo.project(),
+                        demo.draft.is_none().then_some(&demo.snapshot),
+                        demo.selection.as_deref(),
+                        !demo.snapshot.running && demo.dialog.is_none(),
+                        Language::Russian,
+                    );
+                    if let Some(selection) = edit.selection {
+                        demo.selection = selection;
+                    }
+                    if let Some(diagram) = edit.diagram {
+                        demo.update_diagram(diagram);
+                    }
+                    if let Some(pipes) = edit.pipes {
+                        demo.update_pipes(pipes);
+                    }
+                    return;
+                }
                 let interaction = viewport::draw(
                     ui,
                     Language::Russian,
@@ -807,6 +846,7 @@ pub async fn start_app(canvas: web_sys::HtmlCanvasElement, webgl: bool) -> Resul
                 Ok(Box::new(WebStudio {
                     demo: state,
                     camera: Camera::default(),
+                    process: process_ui::View::default(),
                     object_drag: None,
                     quality: if webgl {
                         render::GraphicsQuality::Performance

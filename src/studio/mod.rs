@@ -3,6 +3,7 @@ mod geometry;
 mod i18n;
 mod inspector;
 mod library;
+mod process_ui;
 mod production_ui;
 mod render;
 mod snap;
@@ -30,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     product::{self, Product, UpAxis},
-    project::{Direction, Driver, Part, PartKind, Project, Tag},
+    project::{Direction, Driver, Part, PartKind, Pipe, Project, Tag},
     runtime::{Action, Session},
     sim::{HZ, Quality, Snapshot},
 };
@@ -146,6 +147,7 @@ pub fn open(
                 gpu,
                 selection: None,
                 camera: viewport::Camera::default(),
+                process: process_ui::View::default(),
                 object_drag: None,
                 dirty: false,
                 unsaved: false,
@@ -368,6 +370,7 @@ struct Studio {
     gpu: String,
     selection: Option<String>,
     camera: viewport::Camera,
+    process: process_ui::View,
     object_drag: Option<viewport::ObjectDrag>,
     dirty: bool,
     unsaved: bool,
@@ -430,6 +433,23 @@ impl Studio {
             self.dirty = false;
         }
         Ok(())
+    }
+
+    fn update_pipes(&mut self, pipes: Vec<Pipe>) {
+        if self.dirty {
+            self.project.replace_pipes(pipes);
+        } else {
+            let result = self
+                .session
+                .runtime
+                .handle
+                .execute(Action::SetPipes(pipes.clone()));
+            if result.is_ok() {
+                self.project.replace_pipes(pipes);
+                self.unsaved = true;
+            }
+            self.set_error(result);
+        }
     }
 
     fn action(&mut self, action: Action) {
@@ -649,6 +669,7 @@ impl Studio {
         self.dirty = false;
         self.unsaved = false;
         self.camera = viewport::Camera::default();
+        self.process = process_ui::View::default();
         self.object_drag = None;
         Ok(())
     }
@@ -747,20 +768,7 @@ impl Studio {
             if let Some(pipes) =
                 inspector::pipes(ui, language, &self.project, &id, !snapshot.running)
             {
-                if self.dirty {
-                    self.project.pipes = pipes;
-                } else {
-                    let result = self
-                        .session
-                        .runtime
-                        .handle
-                        .execute(Action::SetPipes(pipes.clone()));
-                    if result.is_ok() {
-                        self.project.pipes = pipes;
-                        self.unsaved = true;
-                    }
-                    self.set_error(result);
-                }
+                self.update_pipes(pipes);
             }
             let prefix = format!("{id}.");
             for (tag_id, tag) in self.project.tags().range(prefix.clone()..) {
@@ -949,6 +957,7 @@ impl Studio {
                                     self.dirty = false;
                                     self.unsaved = true;
                                     self.camera = viewport::Camera::default();
+                                    self.process = process_ui::View::default();
                                     done = true;
                                 }
                                 Err(error) => self.set_error(Err(error)),
@@ -1232,6 +1241,30 @@ impl eframe::App for Studio {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
+                self.process.tabs(ui, self.settings.language);
+                if self.process.open {
+                    self.object_drag = None;
+                    let edit = self.process.show(
+                        ui,
+                        &self.project,
+                        (!self.dirty).then_some(snapshot.as_ref()),
+                        self.selection.as_deref(),
+                        !snapshot.running && self.dialog.is_none(),
+                        self.settings.language,
+                    );
+                    if let Some(selection) = edit.selection {
+                        self.selection = selection;
+                        self.show_tags = false;
+                    }
+                    if let Some(diagram) = edit.diagram {
+                        self.project.process_diagram = diagram;
+                        self.unsaved = true;
+                    }
+                    if let Some(pipes) = edit.pipes {
+                        self.update_pipes(pipes);
+                    }
+                    return;
+                }
                 let interaction = viewport::draw(
                     ui,
                     self.settings.language,

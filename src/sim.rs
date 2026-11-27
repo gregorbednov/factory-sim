@@ -848,7 +848,7 @@ impl Simulation {
     pub fn set_pipes(&mut self, pipes: Vec<crate::project::Pipe>) -> Result<()> {
         ensure!(!self.running, "pause the simulation before changing pipes");
         let mut project = self.project.clone();
-        project.pipes = pipes;
+        project.replace_pipes(pipes);
         project.validate()?;
         self.water.reconnect(&project);
         self.project = project;
