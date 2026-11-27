@@ -40,6 +40,28 @@ impl Language {
             "Scene" => "Сцена",
             "3D scene" => "3D-сцена",
             "Process diagram" => "Схема процесса",
+            "Automation scheme" => "Схема автоматизации",
+            "ISO 10628 · Block diagram" => "ISO 10628 · Блок-схема",
+            "ISO 10628 · Process flow (PFD)" => "ISO 10628 · Технологические потоки (PFD)",
+            "ISO 10628 · Piping and instrumentation (P&ID)" => {
+                "ISO 10628 · Трубопроводы и КИП (P&ID)"
+            }
+            "Main variant" => "Основной вариант",
+            "New variant…" => "Новый вариант…",
+            "Variant name" => "Название варианта",
+            "Variant" => "Вариант",
+            "Create variant" => "Создать вариант",
+            "Manage variant…" => "Управление вариантом…",
+            "Rename variant" => "Переименовать вариант",
+            "Delete variant…" => "Удалить вариант…",
+            "Confirm variant deletion" => "Подтвердить удаление варианта",
+            "Synchronize control links" => "Синхронизировать связи управления",
+            "Choose source variant" => "Выберите вариант-источник",
+            "Control links already match." => "Связи управления совпадают.",
+            "Add link" => "Добавить связь",
+            "Remove link" => "Удалить связь",
+            "Replace link" => "Заменить связь",
+            "Apply selected links" => "Применить выбранные связи",
             "Add water equipment to see a process diagram." => {
                 "Добавьте оборудование водяного контура, чтобы построить схему."
             }
@@ -49,17 +71,36 @@ impl Language {
             }
             "Diagram properties" => "Свойства на схеме",
             "Water connections" => "Соединения труб",
+            "Pipe changes apply to the simulation project." => {
+                "Эти соединения относятся к общему проекту симуляции."
+            }
             "Reset pipe bend" => "Сбросить изгиб трубы",
+            "Line data" => "Данные линии",
+            "Equipment reference" => "Позиция оборудования",
+            "Line reference" => "Поз. обозначение линии",
+            "Medium" => "Среда",
+            "Piping class" => "Класс трубопровода",
+            "Pipe material" => "Материал трубы",
+            "Nominal size (DN)" => "Номинальный размер (DN)",
+            "Design flow (L/s)" => "Проектный расход (л/с)",
+            "Design temperature (°C)" => "Проектная температура (°C)",
+            "Secondary line" => "Второстепенная линия",
             "Diagram label" => "Подпись на схеме",
             "Auto-position symbol" => "Авторазмещение",
             "Instrumentation (GOST 21.208)" => "КИП (ГОСТ 21.208)",
+            "Instrumentation (ISA-5.1)" => "КИП (ISA-5.1)",
             "Add symbol" => "Добавить обозначение",
             "Remove symbol" => "Удалить обозначение",
             "Indication" => "Показание",
             "Transmission" => "Передача сигнала",
             "Control" => "Регулирование",
+            "Indicating control" => "Индикация и регулирование",
             "Alarm" => "Сигнализация",
             "Position number" => "Позиционный номер",
+            "Loop number" => "Номер контура",
+            "Field instrument" => "Полевой прибор",
+            "Operator-accessible instrument" => "Прибор, доступный оператору",
+            "Control output" => "Команда управления",
             "No output signal" => "Без выходного сигнала",
             "The signal documents an external control link." => {
                 "Линия обозначает внешнюю связь управления."

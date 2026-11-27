@@ -33,7 +33,7 @@ use wasm_bindgen::prelude::*;
 
 use i18n::Language;
 use production::Equipment;
-use project::{Direction, Part, PartKind, Pipe, Project, Value, diagram::ProcessDiagram};
+use project::{Direction, Part, PartKind, Pipe, Project, Value};
 use sim::{HZ, Simulation, Snapshot};
 use viewport::{Camera, ObjectDrag};
 
@@ -104,10 +104,9 @@ impl Demo {
         self.draft.get_or_insert_with(|| self.sim.project.clone())
     }
 
-    fn update_diagram(&mut self, diagram: ProcessDiagram) {
+    fn update_diagram(&mut self, edit: &mut process_ui::Edit) {
         let project = self.draft.as_mut().unwrap_or(&mut self.sim.project);
-        project.process_diagram = diagram;
-        self.unsaved = true;
+        self.unsaved |= edit.apply_diagram(project);
     }
 
     fn update_pipes(&mut self, pipes: Vec<Pipe>) {
@@ -678,7 +677,7 @@ impl eframe::App for WebStudio {
                     if let Some(error) = &demo.tag_error {
                         ui.colored_label(editor_ui::WARN, Language::Russian.error(error));
                     }
-                    let edit = self.process.show(
+                    let mut edit = self.process.show(
                         ui,
                         demo.project(),
                         demo.draft.is_none().then_some(&demo.snapshot),
@@ -686,11 +685,9 @@ impl eframe::App for WebStudio {
                         !demo.snapshot.running && demo.dialog.is_none(),
                         Language::Russian,
                     );
+                    demo.update_diagram(&mut edit);
                     if let Some(selection) = edit.selection {
                         demo.selection = selection;
-                    }
-                    if let Some(diagram) = edit.diagram {
-                        demo.update_diagram(diagram);
                     }
                     if let Some(pipes) = edit.pipes {
                         demo.update_pipes(pipes);

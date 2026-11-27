@@ -1,3 +1,6 @@
+#[path = "process_ui/variants.rs"]
+mod variants;
+
 use std::collections::BTreeMap;
 
 use eframe::egui::{
@@ -10,7 +13,8 @@ use crate::{
     project::{
         Direction, Part, PartKind, Pipe, Project, Value, WaterMeasurement,
         diagram::{
-            COORDINATE_LIMIT, DiagramRoute, Instrument, InstrumentFunction, PipeEnds,
+            COORDINATE_LIMIT, DiagramKind, DiagramNode, DiagramVariant, Instrument,
+            InstrumentFunction, InstrumentLocation, InstrumentNotation, LineDetails, PipeEnds,
             ProcessDiagram, Quantity,
         },
     },
@@ -32,6 +36,7 @@ pub(super) struct View {
     fit: bool,
     selected_pipe: Option<PipeEnds>,
     instrument_tag: Option<String>,
+    variants: variants::Controls,
     drag: Option<Drag>,
 }
 
@@ -40,12 +45,36 @@ pub(super) struct Edit {
     pub selection: Option<Option<String>>,
     pub diagram: Option<ProcessDiagram>,
     pub pipes: Option<Vec<Pipe>>,
+    variant: Option<String>,
+    variants: Option<BTreeMap<String, DiagramVariant>>,
 }
 
 impl Edit {
-    fn diagram(&mut self, project: &Project) -> &mut ProcessDiagram {
-        self.diagram
-            .get_or_insert_with(|| project.process_diagram.clone())
+    fn diagram(&mut self, sheet: &ProcessDiagram) -> &mut ProcessDiagram {
+        self.diagram.get_or_insert_with(|| sheet.clone())
+    }
+
+    pub fn apply_diagram(&mut self, project: &mut Project) -> bool {
+        let mut changed = false;
+        if let Some(variants) = self.variants.take() {
+            project.diagram_variants = variants;
+            changed = true;
+        }
+        if let Some(sheet) = self.diagram.take() {
+            match &self.variant {
+                Some(id) => {
+                    if let Some(variant) = project.diagram_variants.get_mut(id) {
+                        variant.sheet = sheet;
+                        changed = true;
+                    }
+                }
+                None => {
+                    project.process_diagram = sheet;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -67,6 +96,7 @@ struct Route<'a> {
     key: PipeEnds,
     bend: Pos2,
     points: [Pos2; 7],
+    data: Option<&'a LineDetails>,
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +136,18 @@ impl View {
         language: Language,
     ) -> Edit {
         let mut edit = Edit::default();
+        if self.variants.show(ui, project, language, &mut edit) {
+            self.fit = true;
+            self.drag = None;
+            self.selected_pipe = None;
+            self.instrument_tag = None;
+        }
+        edit.variant = self.variants.active.clone();
+        let Some(current_sheet) = project.diagram(edit.variant.as_deref()) else {
+            return edit;
+        };
+        self.variants
+            .settings(ui, project, current_sheet, language, &mut edit);
         let parts: BTreeMap<_, _> = project
             .parts
             .iter()
@@ -122,7 +164,7 @@ impl View {
             return edit;
         }
 
-        let layout = positions(project, &parts);
+        let layout = positions(project, &parts, current_sheet);
         let selected_part = selected.and_then(|id| parts.get(id).copied());
         if selected.is_some() {
             self.selected_pipe = None;
@@ -155,12 +197,14 @@ impl View {
                     ui,
                     language,
                     project,
+                    current_sheet,
                     part,
                     &mut self.instrument_tag,
                     &mut edit,
                 );
             });
             ui.collapsing(language.text("Water connections"), |ui| {
+                ui.small(language.text("Pipe changes apply to the simulation project."));
                 if !can_edit_pipes {
                     ui.label(language.text("Pause to edit properties"));
                 }
@@ -179,18 +223,21 @@ impl View {
                         key.to_port + 1
                     ));
                 }
-                if project
-                    .process_diagram
+                if current_sheet
                     .routes
                     .iter()
-                    .any(|route| &route.pipe == key)
+                    .any(|route| &route.pipe == key && route.bend.is_some())
                     && ui.button(language.text("Reset pipe bend")).clicked()
                 {
-                    edit.diagram(project)
-                        .routes
-                        .retain(|route| &route.pipe != key);
+                    edit.diagram(current_sheet)
+                        .update_route(key, |route| route.bend = None);
                 }
             });
+            if current_sheet.kind != DiagramKind::Functional {
+                ui.collapsing(language.text("Line data"), |ui| {
+                    line_properties(ui, language, current_sheet, key, &mut edit);
+                });
+            }
         }
 
         let (response, painter) = ui.allocate_painter(
@@ -198,7 +245,7 @@ impl View {
             Sense::click_and_drag(),
         );
         let rect = response.rect;
-        let sheet = edit.diagram.as_ref().unwrap_or(&project.process_diagram);
+        let sheet = edit.diagram.as_ref().unwrap_or(current_sheet);
         let mut routes = routes(project, sheet, &layout);
         if self.scale == 0.0 || std::mem::take(&mut self.fit) {
             let mut bounds = Rect::NOTHING;
@@ -323,6 +370,9 @@ impl View {
                 route,
                 active,
                 pipe_flow(snapshot, outlet, route.pipe.from_port),
+                sheet.kind,
+                language,
+                &routes,
             );
         }
         draw_instruments(&painter, canvas, sheet, snapshot, &layout, language);
@@ -337,7 +387,12 @@ impl View {
                 canvas,
                 layout[id],
                 part,
+                sheet.kind,
                 label,
+                sheet
+                    .nodes
+                    .get(id)
+                    .and_then(|node| node.reference.as_deref()),
                 selected == Some(id),
                 snapshot,
                 language,
@@ -348,15 +403,18 @@ impl View {
             && let Some(drag) = self.drag.take()
             && drag.point != drag.origin
         {
-            let diagram = edit.diagram(project);
             let point = [drag.point.x, drag.point.y];
             match drag.target {
                 Target::Node(id) if layout.contains_key(id.as_str()) => {
-                    diagram.nodes.entry(id).or_default().position = Some(point);
+                    edit.diagram(current_sheet)
+                        .nodes
+                        .entry(id)
+                        .or_default()
+                        .position = Some(point);
                 }
                 Target::Bend(pipe) if routes.iter().any(|route| route.key == pipe) => {
-                    diagram.routes.retain(|route| route.pipe != pipe);
-                    diagram.routes.push(DiagramRoute { pipe, bend: point });
+                    edit.diagram(current_sheet)
+                        .update_route(&pipe, |route| route.bend = Some(point));
                 }
                 _ => {}
             }
@@ -417,6 +475,7 @@ fn limit(value: f32) -> f32 {
 fn positions<'a>(
     project: &'a Project,
     parts: &BTreeMap<&'a str, &Part>,
+    sheet: &ProcessDiagram,
 ) -> BTreeMap<&'a str, Pos2> {
     let mut levels = BTreeMap::new();
     let mut incoming: BTreeMap<_, Vec<_>> = parts.keys().map(|&id| (id, Vec::new())).collect();
@@ -464,11 +523,7 @@ fn positions<'a>(
     for (level, column) in columns {
         let middle = (column.len() - 1) as f32 * 0.5;
         for (row, id) in column.into_iter().enumerate() {
-            let position = project
-                .process_diagram
-                .nodes
-                .get(id)
-                .and_then(|node| node.position);
+            let position = sheet.nodes.get(id).and_then(|node| node.position);
             layout.insert(
                 id,
                 position.map_or_else(
@@ -483,13 +538,13 @@ fn positions<'a>(
 
 fn routes<'a>(
     project: &'a Project,
-    sheet: &ProcessDiagram,
+    sheet: &'a ProcessDiagram,
     layout: &BTreeMap<&str, Pos2>,
 ) -> Vec<Route<'a>> {
-    let bends: BTreeMap<_, _> = sheet
+    let saved: BTreeMap<_, _> = sheet
         .routes
         .iter()
-        .map(|route| (&route.pipe, route.bend))
+        .map(|route| (&route.pipe, route))
         .collect();
     let parts: BTreeMap<_, _> = project
         .parts
@@ -509,15 +564,16 @@ fn routes<'a>(
             };
             let start = from + vec2(NODE_SIZE.x / 2.0, offset(&key.from, true, key.from_port));
             let end = to + vec2(-NODE_SIZE.x / 2.0, offset(&key.to, false, key.to_port));
-            let bend = bends
-                .get(&key)
-                .copied()
+            let saved = saved.get(&key);
+            let bend = saved
+                .and_then(|route| route.bend)
                 .map_or_else(|| default_bend(start, end, layout), as_pos);
             Some(Route {
                 pipe,
                 key,
                 bend,
                 points: route_points(start, end, bend),
+                data: saved.map(|route| &route.data),
             })
         })
         .collect()
@@ -563,42 +619,55 @@ fn node_properties(
     ui: &mut Ui,
     language: Language,
     project: &Project,
+    sheet: &ProcessDiagram,
     part: &Part,
     instrument_tag: &mut Option<String>,
     edit: &mut Edit,
 ) {
-    let current = project.process_diagram.nodes.get(&part.id);
-    let mut label = current
-        .and_then(|node| node.label.clone())
-        .unwrap_or_default();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(language.text("Diagram label"));
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut label)
-                    .id_salt(&part.id)
-                    .hint_text(&part.name),
-            )
-            .changed()
-        {
-            let nodes = &mut edit.diagram(project).nodes;
-            let node = nodes.entry(part.id.clone()).or_default();
-            node.label = (!label.trim().is_empty()).then_some(label);
-            if node.position.is_none() && node.label.is_none() {
-                nodes.remove(&part.id);
+    let current = sheet.nodes.get(&part.id).cloned().unwrap_or_default();
+    let mut node = current.clone();
+    ui.push_id(&part.id, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(language.text("Diagram label"));
+            let mut label = node.label.clone().unwrap_or_default();
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut label)
+                        .id_salt("label")
+                        .hint_text(&part.name),
+                )
+                .changed()
+            {
+                node.label = (!label.trim().is_empty()).then_some(label);
             }
-        }
-        if current.is_some_and(|node| node.position.is_some())
-            && ui.button(language.text("Auto-position symbol")).clicked()
-        {
-            let nodes = &mut edit.diagram(project).nodes;
-            let node = nodes.entry(part.id.clone()).or_default();
-            node.position = None;
-            if node.label.is_none() {
-                nodes.remove(&part.id);
+            if sheet.kind != DiagramKind::Functional {
+                ui.label(language.text("Equipment reference"));
+                let mut reference = node.reference.clone().unwrap_or_default();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut reference)
+                            .id_salt("reference")
+                            .hint_text(&part.id),
+                    )
+                    .changed()
+                {
+                    node.reference = (!reference.trim().is_empty()).then_some(reference);
+                }
             }
-        }
+            if node.position.is_some() && ui.button(language.text("Auto-position symbol")).clicked()
+            {
+                node.position = None;
+            }
+        });
     });
+    if node != current {
+        let nodes = &mut edit.diagram(sheet).nodes;
+        if node == DiagramNode::default() {
+            nodes.remove(&part.id);
+        } else {
+            nodes.insert(part.id.clone(), node);
+        }
+    }
 
     let tags = project.tags();
     let prefix = format!("{}.", part.id);
@@ -618,10 +687,9 @@ fn node_properties(
     }
     ui.push_id(&part.id, |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label(language.text("Instrumentation (GOST 21.208)"));
-            let selected = instrument_tag.as_ref().unwrap();
+            ui.label(language.text(sheet.notation.label()));
             egui::ComboBox::from_id_salt("measurement")
-                .selected_text(language.text(&tags[selected].name))
+                .selected_text(language.text(&tags[instrument_tag.as_ref().unwrap()].name))
                 .show_ui(ui, |ui| {
                     for (id, tag) in &measurements {
                         ui.selectable_value(
@@ -632,89 +700,196 @@ fn node_properties(
                     }
                 });
             let id = instrument_tag.as_ref().unwrap();
-            let Some(current) = project.process_diagram.instruments.get(id) else {
-                if ui.button(language.text("Add symbol")).clicked() {
-                    let number = project
-                        .process_diagram
-                        .instruments
-                        .values()
-                        .map(|instrument| instrument.number)
-                        .max()
-                        .unwrap_or(0)
-                        .saturating_add(1);
-                    edit.diagram(project).instruments.insert(
-                        id.clone(),
-                        Instrument {
-                            number,
-                            function: InstrumentFunction::Indication,
-                            output_tag: None,
-                        },
-                    );
-                }
-                return;
-            };
-            let mut instrument = current.clone();
-            egui::ComboBox::from_id_salt("function")
-                .selected_text(language.text(instrument.function.label()))
-                .show_ui(ui, |ui| {
-                    for function in [
-                        InstrumentFunction::Indication,
-                        InstrumentFunction::Transmission,
-                        InstrumentFunction::Control,
-                        InstrumentFunction::Alarm,
-                    ] {
-                        ui.selectable_value(
-                            &mut instrument.function,
-                            function,
-                            language.text(function.label()),
-                        );
-                    }
-                });
-            ui.label(language.text("Position number"));
-            ui.add(egui::DragValue::new(&mut instrument.number).range(1..=u32::MAX));
-            if instrument.function == InstrumentFunction::Control {
-                let output = instrument.output_tag.as_ref().map_or_else(
-                    || language.text("No output signal").to_owned(),
-                    |id| format!("{id} · {}", language.text(&tags[id].name)),
-                );
-                egui::ComboBox::from_id_salt("output")
-                    .selected_text(output)
+            if let Some(current) = sheet.instruments.get(id) {
+                let mut instrument = current.clone();
+                egui::ComboBox::from_id_salt("function")
+                    .selected_text(language.text(instrument.function.label()))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut instrument.output_tag,
-                            None,
-                            language.text("No output signal"),
-                        );
-                        for (output, tag) in &tags {
-                            if tag.direction == Direction::Actuator
-                                && let Some((owner, _)) = output.split_once('.')
-                                && project
-                                    .parts
-                                    .iter()
-                                    .any(|part| part.id == owner && has_water_ports(part))
-                            {
+                        for function in [
+                            InstrumentFunction::Indication,
+                            InstrumentFunction::Transmission,
+                            InstrumentFunction::Control,
+                            InstrumentFunction::IndicatingControl,
+                            InstrumentFunction::Alarm,
+                        ] {
+                            ui.selectable_value(
+                                &mut instrument.function,
+                                function,
+                                language.text(function.label()),
+                            );
+                        }
+                    });
+                ui.label(language.text(match sheet.notation {
+                    InstrumentNotation::Gost => "Position number",
+                    InstrumentNotation::Isa => "Loop number",
+                }));
+                ui.add(egui::DragValue::new(&mut instrument.number).range(1..=u32::MAX));
+                if sheet.notation == InstrumentNotation::Isa {
+                    egui::ComboBox::from_id_salt("location")
+                        .selected_text(language.text(instrument.location.label()))
+                        .show_ui(ui, |ui| {
+                            for location in [InstrumentLocation::Field, InstrumentLocation::Panel] {
                                 ui.selectable_value(
-                                    &mut instrument.output_tag,
-                                    Some(output.clone()),
-                                    format!("{output} · {}", language.text(&tag.name)),
+                                    &mut instrument.location,
+                                    location,
+                                    language.text(location.label()),
                                 );
                             }
-                        }
-                    })
-                    .response
-                    .on_hover_text(language.text("The signal documents an external control link."));
-            } else {
-                instrument.output_tag = None;
-            }
-            if ui.button(language.text("Remove symbol")).clicked() {
-                edit.diagram(project).instruments.remove(id);
-            } else if instrument != *current {
-                edit.diagram(project)
+                        });
+                }
+                if ui.button(language.text("Remove symbol")).clicked() {
+                    edit.diagram(sheet).instruments.remove(id);
+                } else if instrument != *current {
+                    edit.diagram(sheet)
+                        .instruments
+                        .insert(id.clone(), instrument);
+                }
+            } else if ui.button(language.text("Add symbol")).clicked() {
+                let number = sheet
                     .instruments
-                    .insert(id.clone(), instrument);
+                    .values()
+                    .map(|instrument| instrument.number)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                edit.diagram(sheet).instruments.insert(
+                    id.clone(),
+                    Instrument {
+                        number,
+                        function: InstrumentFunction::Indication,
+                        location: InstrumentLocation::Field,
+                    },
+                );
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(language.text("Control output"));
+            let current = sheet.control_links.get(instrument_tag.as_ref().unwrap());
+            let mut output = current.cloned();
+            let label = output.as_ref().map_or_else(
+                || language.text("No output signal").to_owned(),
+                |id| format!("{id} · {}", language.text(&tags[id].name)),
+            );
+            egui::ComboBox::from_id_salt("output")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut output, None, language.text("No output signal"));
+                    for (id, tag) in &tags {
+                        if tag.direction == Direction::Actuator
+                            && let Some((owner, _)) = id.split_once('.')
+                            && project
+                                .parts
+                                .iter()
+                                .any(|part| part.id == owner && has_water_ports(part))
+                        {
+                            ui.selectable_value(
+                                &mut output,
+                                Some(id.clone()),
+                                format!("{id} · {}", language.text(&tag.name)),
+                            );
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(language.text("The signal documents an external control link."));
+            if output.as_ref() != current {
+                let input = instrument_tag.as_ref().unwrap();
+                let links = &mut edit.diagram(sheet).control_links;
+                if let Some(output) = output {
+                    links.insert(input.clone(), output);
+                } else {
+                    links.remove(input);
+                }
             }
         });
     });
+}
+
+fn line_properties(
+    ui: &mut Ui,
+    language: Language,
+    sheet: &ProcessDiagram,
+    pipe: &PipeEnds,
+    edit: &mut Edit,
+) {
+    let current = sheet
+        .routes
+        .iter()
+        .find(|route| &route.pipe == pipe)
+        .map(|route| route.data.clone())
+        .unwrap_or_default();
+    let mut data = current.clone();
+    ui.horizontal_wrapped(|ui| {
+        let mut field = |key: &str, value: &mut String| {
+            ui.label(language.text(key));
+            ui.add(
+                egui::TextEdit::singleline(value)
+                    .id_salt(key)
+                    .desired_width(105.0),
+            );
+        };
+        field("Line reference", &mut data.reference);
+        if sheet.kind == DiagramKind::IsoPid {
+            field("Piping class", &mut data.piping_class);
+            field("Pipe material", &mut data.material);
+        } else {
+            field("Medium", &mut data.medium);
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        if sheet.kind == DiagramKind::IsoPid {
+            ui.label(language.text("Nominal size (DN)"));
+            let mut size = data.nominal_size_mm.unwrap_or(0);
+            if ui
+                .add(egui::DragValue::new(&mut size).range(0..=u32::MAX))
+                .changed()
+            {
+                data.nominal_size_mm = (size != 0).then_some(size);
+            }
+        } else {
+            optional_value(
+                ui,
+                language.text("Design flow (L/s)"),
+                &mut data.design_flow_l_s,
+                0.0..=f32::MAX,
+            );
+            optional_value(
+                ui,
+                language.text("Design temperature (°C)"),
+                &mut data.design_temperature_c,
+                -273.15..=f32::MAX,
+            );
+        }
+        ui.checkbox(&mut data.secondary, language.text("Secondary line"));
+    });
+    if data != current {
+        edit.diagram(sheet)
+            .update_route(pipe, |route| route.data = data);
+    }
+}
+
+fn optional_value(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut Option<f32>,
+    range: std::ops::RangeInclusive<f32>,
+) {
+    let mut enabled = value.is_some();
+    if ui.checkbox(&mut enabled, label).changed() {
+        *value = enabled.then_some(0.0);
+    }
+    if let Some(value) = value {
+        ui.add(egui::DragValue::new(value).range(range).speed(0.05));
+    }
+}
+
+impl InstrumentLocation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Field => "Field instrument",
+            Self::Panel => "Operator-accessible instrument",
+        }
+    }
 }
 
 impl InstrumentFunction {
@@ -723,16 +898,18 @@ impl InstrumentFunction {
             Self::Indication => "Indication",
             Self::Transmission => "Transmission",
             Self::Control => "Control",
+            Self::IndicatingControl => "Indicating control",
             Self::Alarm => "Alarm",
         }
     }
 
-    fn letter(self) -> char {
+    fn letters(self) -> &'static str {
         match self {
-            Self::Indication => 'I',
-            Self::Transmission => 'T',
-            Self::Control => 'C',
-            Self::Alarm => 'A',
+            Self::Indication => "I",
+            Self::Transmission => "T",
+            Self::Control => "C",
+            Self::IndicatingControl => "IC",
+            Self::Alarm => "A",
         }
     }
 }
@@ -774,11 +951,33 @@ fn draw_grid(painter: &Painter, rect: Rect, canvas: Canvas) {
     }
 }
 
-fn draw_route(painter: &Painter, canvas: Canvas, route: &Route<'_>, selected: bool, flow: bool) {
+fn draw_route(
+    painter: &Painter,
+    canvas: Canvas,
+    route: &Route<'_>,
+    selected: bool,
+    flow: bool,
+    kind: DiagramKind,
+    language: Language,
+    routes: &[Route<'_>],
+) {
     let points = route.points.map(|point| canvas.point(point));
     let color = if flow { ACCENT } else { MUTE };
-    let stroke = Stroke::new(if selected { 2.8 } else { 1.65 }, color);
-    painter.add(Shape::line(points.to_vec(), stroke));
+    let width = if kind == DiagramKind::Functional {
+        1.65
+    } else if route.secondary() {
+        1.15
+    } else {
+        2.3
+    };
+    let stroke = Stroke::new(width + if selected { 0.9 } else { 0.0 }, color);
+    if kind == DiagramKind::Functional {
+        painter.add(Shape::line(points.to_vec(), stroke));
+    } else {
+        for edge in route.points.windows(2) {
+            draw_iso_segment(painter, canvas, [edge[0], edge[1]], route, routes, stroke);
+        }
+    }
     let tip = points[6] - vec2(2.0, 0.0);
     let size = (8.0 * canvas.scale).clamp(4.0, 12.0);
     painter.add(Shape::convex_polygon(
@@ -798,6 +997,124 @@ fn draw_route(painter: &Painter, canvas: Canvas, route: &Route<'_>, selected: bo
             Stroke::new(2.0, ACCENT),
         );
     }
+    if kind != DiagramKind::Functional
+        && canvas.scale >= 0.28
+        && let Some(data) = route.data
+    {
+        let mut label = Vec::new();
+        if !data.reference.trim().is_empty() {
+            label.push(data.reference.clone());
+        }
+        if kind == DiagramKind::IsoPid {
+            if let Some(dn) = data.nominal_size_mm {
+                label.push(format!("DN {dn}"));
+            }
+            for field in [&data.piping_class, &data.material] {
+                if !field.trim().is_empty() {
+                    label.push(field.clone());
+                }
+            }
+        } else {
+            if !data.medium.trim().is_empty() {
+                label.push(data.medium.clone());
+            }
+            if let Some(flow) = data.design_flow_l_s {
+                label.push(format!("{flow} {}", Quantity::Flow.unit(language)));
+            }
+            if let Some(temperature) = data.design_temperature_c {
+                label.push(format!("{temperature} °C"));
+            }
+        }
+        if !label.is_empty()
+            && let Some(edge) = points
+                .windows(2)
+                .filter(|edge| edge[0].y == edge[1].y)
+                .max_by(|a, b| (a[0].x - a[1].x).abs().total_cmp(&(b[0].x - b[1].x).abs()))
+        {
+            let point = edge[0].lerp(edge[1], 0.5) - vec2(0.0, 4.0);
+            painter.text(
+                point,
+                Align2::CENTER_BOTTOM,
+                label.join(" · "),
+                FontId::monospace((11.0 * canvas.scale).clamp(8.0, 16.0)),
+                TEXT,
+            );
+        }
+    }
+}
+
+impl Route<'_> {
+    fn secondary(&self) -> bool {
+        self.data.is_some_and(|data| data.secondary)
+    }
+}
+
+fn draw_iso_segment(
+    painter: &Painter,
+    canvas: Canvas,
+    edge: [Pos2; 2],
+    route: &Route<'_>,
+    routes: &[Route<'_>],
+    stroke: Stroke,
+) {
+    let [start, end] = edge;
+    let length = start.distance(end);
+    if length == 0.0 {
+        return;
+    }
+    let mut cursor = 0.0_f32;
+    let gap = 4.0 / canvas.scale;
+    let point = |distance: f32| canvas.point(start.lerp(end, distance / length));
+    for crossing in iso_crossings(edge, route, routes) {
+        if cursor < crossing - gap {
+            painter.line_segment([point(cursor), point(crossing - gap)], stroke);
+        }
+        cursor = cursor.max(crossing + gap);
+    }
+    if cursor < length {
+        painter.line_segment([point(cursor), point(length)], stroke);
+    }
+}
+
+fn iso_crossings([start, end]: [Pos2; 2], route: &Route<'_>, routes: &[Route<'_>]) -> Vec<f32> {
+    let range = Rect::from_two_pos(start, end);
+    let vertical = start.x == end.x;
+    let mut crossings = Vec::new();
+    for other in routes.iter().filter(|other| other.key != route.key) {
+        let interrupt = match (route.secondary(), other.secondary()) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => vertical,
+        };
+        if !interrupt {
+            continue;
+        }
+        for points in other.points.windows(2) {
+            let [a, b] = [points[0], points[1]];
+            let bounds = Rect::from_two_pos(a, b);
+            if vertical
+                && a.y == b.y
+                && a.x != b.x
+                && bounds.left() < start.x
+                && start.x < bounds.right()
+                && range.top() < a.y
+                && a.y < range.bottom()
+            {
+                crossings.push((a.y - start.y).abs());
+            } else if !vertical
+                && a.x == b.x
+                && a.y != b.y
+                && bounds.top() < start.y
+                && start.y < bounds.bottom()
+                && range.left() < a.x
+                && a.x < range.right()
+            {
+                crossings.push((a.x - start.x).abs());
+            }
+        }
+    }
+    crossings.sort_unstable_by(f32::total_cmp);
+    crossings
 }
 
 fn pipe_flow(snapshot: Option<&Snapshot>, part: &Part, port: u8) -> bool {
@@ -822,6 +1139,9 @@ fn draw_instruments(
     layout: &BTreeMap<&str, Pos2>,
     language: Language,
 ) {
+    if sheet.kind == DiagramKind::IsoBlock {
+        return;
+    }
     let mut by_part = BTreeMap::<&str, Vec<_>>::new();
     for (tag, instrument) in &sheet.instruments {
         if let Some((part, _)) = tag.split_once('.')
@@ -834,47 +1154,87 @@ fn draw_instruments(
                 .push((tag, instrument, quantity));
         }
     }
-    let mut symbols = Vec::new();
+    let mut symbols = BTreeMap::new();
+    let stroke = Stroke::new(1.15, WARN);
     for (id, instruments) in by_part {
         let node = layout[id];
         for (index, (tag, instrument, quantity)) in instruments.into_iter().enumerate() {
             let offset = [-29.0, 29.0, -87.0, 87.0][index % 4];
             let center = node + vec2(offset, -57.0 - (index / 4) as f32 * 54.0);
             let attach = node + vec2(offset.clamp(-32.0, 32.0), -NODE_SIZE.y / 2.0);
-            let stroke = Stroke::new(1.15, WARN);
             painter.line_segment([canvas.point(center), canvas.point(attach)], stroke);
-            if let Some(target) = instrument
-                .output_tag
-                .as_deref()
-                .and_then(|id| id.split_once('.'))
-                .and_then(|(id, _)| layout.get(id))
-            {
-                let end = *target - vec2(0.0, NODE_SIZE.y / 2.0);
-                let height = end.y.min(center.y) - 28.0;
-                let points = [center, pos2(center.x, height), pos2(end.x, height), end]
-                    .map(|point| canvas.point(point));
-                painter.add(Shape::line(points.to_vec(), stroke));
-                let tip = points[3];
-                let size = (7.0 * canvas.scale).clamp(3.0, 10.0);
-                painter.line_segment([tip, tip + vec2(-size * 0.48, -size)], stroke);
-                painter.line_segment([tip, tip + vec2(size * 0.48, -size)], stroke);
-            }
-            symbols.push((center, tag.as_str(), instrument, quantity));
+            symbols.insert(tag.as_str(), (center, instrument, quantity));
         }
     }
-    for (center, tag, instrument, quantity) in symbols {
+    if sheet.kind != DiagramKind::IsoPfd {
+        for (input, output) in &sheet.control_links {
+            let owner = |tag: &str| {
+                let (id, _) = tag.split_once('.')?;
+                layout
+                    .get(id)
+                    .map(|&center| center - vec2(0.0, NODE_SIZE.y / 2.0))
+            };
+            let (Some(source), Some(end)) = (owner(input), owner(output)) else {
+                continue;
+            };
+            let symbol = symbols.get(input.as_str());
+            let center = symbol.map_or(source, |&(center, _, _)| center);
+            let height = end.y.min(center.y) - 30.0;
+            let start = pos2(center.x, height);
+            let mut points = vec![center, start];
+            if (center.x - end.x).abs() < 5.0 {
+                let x = end.x + 55.0;
+                points.extend([
+                    pos2(x, height),
+                    pos2(x, end.y - 14.0),
+                    pos2(end.x, end.y - 14.0),
+                ]);
+            } else {
+                points.push(pos2(end.x, height));
+            }
+            points.push(end);
+            painter.add(Shape::line(
+                points
+                    .into_iter()
+                    .map(|point| canvas.point(point))
+                    .collect(),
+                stroke,
+            ));
+            let tip = canvas.point(end);
+            let size = (7.0 * canvas.scale).clamp(3.0, 10.0);
+            painter.line_segment([tip, tip + vec2(-size * 0.48, -size)], stroke);
+            painter.line_segment([tip, tip + vec2(size * 0.48, -size)], stroke);
+            if symbol.is_none()
+                && canvas.scale >= 0.27
+                && let Some(quantity) = Quantity::for_tag(input)
+            {
+                painter.text(
+                    canvas.point(start) + vec2(3.0, 0.0),
+                    Align2::LEFT_BOTTOM,
+                    format!("{}C", quantity.letter()),
+                    FontId::monospace((11.0 * canvas.scale).max(7.0)),
+                    WARN,
+                );
+            }
+        }
+    }
+    for (tag, (center, instrument, quantity)) in symbols {
         let center = canvas.point(center);
         let radius = 17.0 * canvas.scale;
         painter.circle(center, radius, BACKGROUND, Stroke::new(1.3, WARN));
-        painter.hline(
-            (center.x - radius)..=(center.x + radius),
-            center.y,
-            Stroke::new(1.0, WARN),
-        );
+        if sheet.notation == InstrumentNotation::Gost
+            || instrument.location == InstrumentLocation::Panel
+        {
+            painter.hline(
+                (center.x - radius)..=(center.x + radius),
+                center.y,
+                Stroke::new(1.0, WARN),
+            );
+        }
         if canvas.scale < 0.27 {
             continue;
         }
-        let code = format!("{}{}", quantity.letter(), instrument.function.letter());
+        let code = format!("{}{}", quantity.letter(), instrument.function.letters());
         painter.text(
             center - vec2(0.0, radius * 0.49),
             Align2::CENTER_CENTER,
@@ -934,7 +1294,9 @@ fn draw_node(
     canvas: Canvas,
     center: Pos2,
     part: &Part,
+    kind: DiagramKind,
     label: &str,
+    reference: Option<&str>,
     selected: bool,
     snapshot: Option<&Snapshot>,
     language: Language,
@@ -952,6 +1314,25 @@ fn draw_node(
         painter.rect_stroke(rect, 4.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
     }
 
+    if kind == DiagramKind::IsoBlock {
+        painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
+        if canvas.scale >= 0.24 {
+            let galley = painter.layout(
+                label.to_owned(),
+                FontId::proportional((10.0 * canvas.scale).max(7.0)),
+                color,
+                rect.width() * 0.90,
+            );
+            painter.with_clip_rect(rect.shrink(2.0)).galley(
+                rect.center() - galley.size() * 0.5,
+                galley,
+                color,
+            );
+        }
+        return;
+    }
+
+    let iso = kind != DiagramKind::Functional;
     let line = |points: &[(f32, f32)]| {
         painter.add(Shape::line(
             points.iter().map(|&(x, y)| at(x, y)).collect(),
@@ -992,6 +1373,10 @@ fn draw_node(
             ]);
             line(&[(-8.0, 15.0), (8.0, 15.0)]);
         }
+        PartKind::WaterPump { .. } if iso => {
+            painter.circle_stroke(at(0.0, 0.0), 18.0 * canvas.scale, stroke);
+            line(&[(-13.0, 12.0), (11.0, -14.0)]);
+        }
         PartKind::WaterPump { .. } => {
             painter.circle_stroke(at(0.0, 0.0), 18.0 * canvas.scale, stroke);
             line(&[(-9.0, -9.0), (12.0, 0.0), (-9.0, 9.0), (-9.0, -9.0)]);
@@ -1030,6 +1415,12 @@ fn draw_node(
                 );
             }
         }
+        PartKind::WaterFilter { .. } if iso => {
+            box_outline(18.0, 16.0, 0.0);
+            for x in [-14.0, -7.0, 0.0, 7.0] {
+                line(&[(x, 0.0), (x + 4.0, 0.0)]);
+            }
+        }
         PartKind::WaterFilter { .. } => {
             line(&[
                 (-18.0, 0.0),
@@ -1049,6 +1440,18 @@ fn draw_node(
                 (7.0, -5.0),
                 (13.0, 5.0),
             ]);
+        }
+        PartKind::WaterHeatExchanger { .. } if iso => {
+            painter.circle_stroke(at(0.0, 0.0), 20.0 * canvas.scale, stroke);
+            line(&[
+                (-18.0, 9.0),
+                (-8.0, 9.0),
+                (-3.0, -5.0),
+                (3.0, 5.0),
+                (9.0, -9.0),
+                (18.0, -9.0),
+            ]);
+            line(&[(-18.0, -9.0), (-12.0, -9.0), (12.0, 9.0), (18.0, 9.0)]);
         }
         PartKind::WaterHeatExchanger { .. } => {
             box_outline(18.0, 17.0, 4.0 * canvas.scale);
@@ -1070,6 +1473,15 @@ fn draw_node(
     }
     if canvas.scale < 0.26 {
         return;
+    }
+    if iso {
+        painter.text(
+            at(0.0, -29.0),
+            Align2::CENTER_BOTTOM,
+            reference.unwrap_or(&part.id),
+            FontId::monospace((11.5 * canvas.scale).max(7.0)),
+            color,
+        );
     }
     let label_size = (13.0 * canvas.scale).max(8.0);
     let pad = (COLUMN * 0.46 * canvas.scale).max(10.0);
@@ -1118,11 +1530,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dragging_a_symbol_changes_only_the_sheet() -> anyhow::Result<()> {
+    fn iso_crossings_interrupt_the_thinner_or_vertical_line() {
+        let first = Pipe::new("source", "pump");
+        let second = Pipe::new("tank", "valve");
+        let horizontal = [pos2(0.0, 20.0), pos2(40.0, 20.0)];
+        let vertical = [pos2(20.0, 0.0), pos2(20.0, 40.0)];
+        let mut routes = [&first, &second]
+            .into_iter()
+            .zip([horizontal, vertical])
+            .map(|(pipe, [start, end])| {
+                let mut points = [end; 7];
+                points[0] = start;
+                Route {
+                    pipe,
+                    key: PipeEnds::from(pipe),
+                    bend: end,
+                    points,
+                    data: None,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert!(iso_crossings(horizontal, &routes[0], &routes).is_empty());
+        assert_eq!(iso_crossings(vertical, &routes[1], &routes), vec![20.0]);
+
+        let secondary = LineDetails {
+            secondary: true,
+            ..Default::default()
+        };
+        routes[0].data = Some(&secondary);
+        assert_eq!(iso_crossings(horizontal, &routes[0], &routes), vec![20.0]);
+        assert!(iso_crossings(vertical, &routes[1], &routes).is_empty());
+    }
+
+    #[test]
+    fn dragging_a_symbol_changes_only_the_selected_variant() -> anyhow::Result<()> {
         let project: Project =
             serde_json::from_str(include_str!("../../examples/heated-tank.json"))?;
         let ctx = egui::Context::default();
         let mut view = View::default();
+        view.variants.active = Some("iso-pid".to_owned());
         let frame = |view: &mut View, events| {
             let mut edit = Edit::default();
             let mut output = ctx.run_ui(
@@ -1151,7 +1598,7 @@ mod tests {
             .iter()
             .map(|part| (part.id.as_str(), part))
             .collect();
-        let tank = positions(&project, &parts)["tank"];
+        let tank = positions(&project, &parts, &project.diagram_variants["iso-pid"].sheet)["tank"];
         let canvas = Canvas {
             origin: rect.center() + view.pan,
             scale: view.scale,
@@ -1169,12 +1616,20 @@ mod tests {
         let (_, edit) = frame(&mut view, vec![egui::Event::PointerMoved(to)]);
         assert_eq!(edit.selection, Some(Some("tank".to_owned())));
         assert!(edit.diagram.is_none());
-        let (_, edit) = frame(&mut view, vec![button(to, false)]);
-        let diagram = edit
-            .diagram
-            .expect("releasing the symbol saves its position");
-        let position = as_pos(diagram.nodes["tank"].position.unwrap());
+        let (_, mut edit) = frame(&mut view, vec![button(to, false)]);
+        let mut saved = project.clone();
+        assert!(edit.apply_diagram(&mut saved));
+        let position = as_pos(
+            saved.diagram_variants["iso-pid"].sheet.nodes["tank"]
+                .position
+                .unwrap(),
+        );
         assert!(position.distance(canvas.unproject(to)) < 0.01);
+        assert_eq!(saved.process_diagram, project.process_diagram);
+        assert_eq!(
+            saved.diagram_variants["isa"],
+            project.diagram_variants["isa"]
+        );
         assert!(edit.pipes.is_none());
         Ok(())
     }

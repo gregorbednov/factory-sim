@@ -29,6 +29,8 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "diagram::ProcessDiagram::is_empty")]
     pub process_diagram: diagram::ProcessDiagram,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub diagram_variants: BTreeMap<String, diagram::DiagramVariant>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub products: BTreeMap<String, Product>,
     #[serde(default)]
     pub tag_names: BTreeMap<String, String>,
@@ -681,6 +683,7 @@ impl Project {
             parts: Vec::new(),
             pipes: Vec::new(),
             process_diagram: Default::default(),
+            diagram_variants: Default::default(),
             products: Default::default(),
             tag_names: Default::default(),
             initial_commands: Default::default(),
@@ -739,6 +742,9 @@ impl Project {
         self.parts.remove(index);
         self.pipes.retain(|pipe| pipe.from != id && pipe.to != id);
         self.process_diagram.remove_part(id, &self.pipes);
+        for variant in self.diagram_variants.values_mut() {
+            variant.sheet.remove_part(id, &self.pipes);
+        }
         for part in &mut self.parts {
             if let PartKind::Emitter {
                 random_spawn_belt, ..
@@ -827,7 +833,18 @@ impl Project {
     #[cfg(any(feature = "studio", feature = "web", test))]
     pub fn replace_pipes(&mut self, pipes: Vec<Pipe>) {
         self.process_diagram.retain_routes(&pipes);
+        for variant in self.diagram_variants.values_mut() {
+            variant.sheet.retain_routes(&pipes);
+        }
         self.pipes = pipes;
+    }
+
+    #[cfg(any(feature = "studio", feature = "web"))]
+    pub fn diagram(&self, variant: Option<&str>) -> Option<&diagram::ProcessDiagram> {
+        match variant {
+            Some(id) => self.diagram_variants.get(id).map(|variant| &variant.sheet),
+            None => Some(&self.process_diagram),
+        }
     }
 
     pub fn tags(&self) -> BTreeMap<String, Tag> {
@@ -1689,6 +1706,16 @@ impl Project {
         }
         let tags = self.tags();
         self.process_diagram.validate(self, &tags)?;
+        for (id, variant) in &self.diagram_variants {
+            ensure!(
+                valid_id(id) && !variant.name.trim().is_empty(),
+                "invalid diagram variant {id}"
+            );
+            variant
+                .sheet
+                .validate(self, &tags)
+                .with_context(|| format!("invalid diagram variant {id}"))?;
+        }
         for (id, name) in &self.tag_names {
             ensure!(
                 tags.contains_key(id) && !name.trim().is_empty(),

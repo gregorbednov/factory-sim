@@ -1244,7 +1244,7 @@ impl eframe::App for Studio {
                 self.process.tabs(ui, self.settings.language);
                 if self.process.open {
                     self.object_drag = None;
-                    let edit = self.process.show(
+                    let mut edit = self.process.show(
                         ui,
                         &self.project,
                         (!self.dirty).then_some(snapshot.as_ref()),
@@ -1252,13 +1252,12 @@ impl eframe::App for Studio {
                         !snapshot.running && self.dialog.is_none(),
                         self.settings.language,
                     );
+                    if edit.apply_diagram(&mut self.project) {
+                        self.unsaved = true;
+                    }
                     if let Some(selection) = edit.selection {
                         self.selection = selection;
                         self.show_tags = false;
-                    }
-                    if let Some(diagram) = edit.diagram {
-                        self.project.process_diagram = diagram;
-                        self.unsaved = true;
                     }
                     if let Some(pipes) = edit.pipes {
                         self.update_pipes(pipes);

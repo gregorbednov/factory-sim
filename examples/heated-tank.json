@@ -145,13 +145,38 @@
     "instruments": {
       "tank.level_pct": {
         "function": "control",
-        "number": 1,
-        "output_tag": "valve.opening_pct"
+        "number": 1
       },
       "tank.temperature_c": {
         "function": "indication",
         "number": 2
       }
+    },
+    "control_links": {
+      "tank.level_pct": "valve.opening_pct"
+    }
+  },
+  "diagram_variants": {
+    "isa": {
+      "name": "КИП по ISA-5.1",
+      "sheet": {
+        "notation": "isa",
+        "instruments": {
+          "tank.level_pct": {
+            "function": "indicating_control",
+            "number": 101,
+            "location": "panel"
+          }
+        }
+      }
+    },
+    "iso-pfd": {
+      "name": "Технологические потоки (PFD)",
+      "sheet": { "kind": "iso_pfd" }
+    },
+    "iso-pid": {
+      "name": "Трубопроводы и КИП (P&ID)",
+      "sheet": { "kind": "iso_pid", "notation": "isa" }
     }
   },
   "tag_names": {},
